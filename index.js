@@ -439,11 +439,7 @@ function connect() {
         }
         return;
       }
-if (!valid.includes(cat)) { sendRcon('say [5Heads Arena Bot]: Unknown category. Valid: ' + valid.join(', ')); return; }
-        sendRcon(addExample(cat, phrase) ? 'say [5Heads Arena Bot]: Got it! I now know "' + phrase + '" is a ' + cat + ' question.' : 'say [5Heads Arena Bot]: I already know that one!');
-        return;
-      }
-      if (text.startsWith('!block ')) {
+if (text.startsWith('!block ')) {
         const word = text.slice(7).trim();
         if (BLOCKED_WORDS.includes(word)) { sendRcon('say [5Heads Arena Bot]: "' + word + '" is already blocked!'); return; }
         BLOCKED_WORDS.push(word); saveBlockedWords();
