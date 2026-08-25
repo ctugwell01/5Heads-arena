@@ -553,7 +553,7 @@ if (text.startsWith('!block ')) {
             await fetch(DISCORD_WEBHOOK, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ embeds: [{ title: '⚠️ Ruscar Bot OFFLINE', color: 15158332, description: 'The moderation bot has been disconnected for over 2 minutes. Chat is **unmonitored**.', timestamp: new Date().toISOString() }] })
+              body: JSON.stringify({ embeds: [{ title: '⚠️ 5Heads Arena Bot OFFLINE', color: 15158332, description: 'The moderation bot has been disconnected for over 2 minutes. Chat is **unmonitored**.', timestamp: new Date().toISOString() }] })
             });
           } catch(e) { console.log('Failed to send offline alert:', e.message); }
         }
@@ -570,7 +570,7 @@ if (text.startsWith('!block ')) {
         fetch(DISCORD_WEBHOOK, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ embeds: [{ title: '✅ Ruscar Bot ONLINE', color: 3066993, description: 'The moderation bot has reconnected. Chat is now monitored.', timestamp: new Date().toISOString() }] })
+          body: JSON.stringify({ embeds: [{ title: '✅ 5Heads Arena Bot ONLINE', color: 3066993, description: 'The moderation bot has reconnected. Chat is now monitored.', timestamp: new Date().toISOString() }] })
         }).catch(function() {});
       }
     }
