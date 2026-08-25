@@ -66,13 +66,11 @@ try { if (fs.existsSync(EXAMPLES_FILE)) { savedExamples = JSON.parse(fs.readFile
 
 function saveExamples() { fs.writeFileSync(EXAMPLES_FILE, JSON.stringify(savedExamples, null, 2)); }
 
-// Pre-teach the AI that vulgar words in other languages are not racial slurs
 if (!savedExamples['notSlur']) savedExamples['notSlur'] = [];
 ['yarrak', 'yarak', 'porra', 'caralho', 'merde', 'scheisse', 'putain', 'cazzo', 'vaffanculo'].forEach(function(w) {
   if (!savedExamples['notSlur'].includes(w)) savedExamples['notSlur'].push(w);
 });
 
-// Voice learning examples
 const VOICE_EXAMPLES_FILE = '/tmp/voice_examples.json';
 let voiceExamples = { slur: [], clean: [] };
 try { if (fs.existsSync(VOICE_EXAMPLES_FILE)) { voiceExamples = JSON.parse(fs.readFileSync(VOICE_EXAMPLES_FILE, 'utf8')); console.log('Loaded ' + voiceExamples.slur.length + ' voice slur examples, ' + voiceExamples.clean.length + ' clean examples'); } } catch(e) {}
@@ -102,7 +100,7 @@ function buildExamplesPrompt() {
 
 
 const spamOffences    = {};
-const prisonHistory   = {}; // tracks all prisons per player
+const prisonHistory   = {};
 try { if (fs.existsSync(HISTORY_FILE)) { const h = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); Object.assign(prisonHistory, h); console.log('Loaded prison history for ' + Object.keys(h).length + ' players'); } } catch(e) {}
 function savePrisonHistory() { fs.writeFileSync(HISTORY_FILE, JSON.stringify(prisonHistory, null, 2)); saveHistoryToGitHub(); }
 const prisoned        = new Set();
@@ -118,7 +116,8 @@ try { if (fs.existsSync(BLOCKED_FILE)) { const extra = JSON.parse(fs.readFileSyn
 const HARDCODED_WORDS = [...BLOCKED_WORDS];
 function saveBlockedWords() { const custom = BLOCKED_WORDS.filter(function(w) { return !HARDCODED_WORDS.includes(w); }); fs.writeFileSync(BLOCKED_FILE, JSON.stringify(custom, null, 2)); }
 
-const SPAM_TIMERS = [5, 10, 30];
+const SPAM_TIMERS = [10, 20, 1440];
+const SLUR_TIMERS = [10, 20, 1440];
 let ws;
 let counter = 1;
 
@@ -148,12 +147,16 @@ function getSpamMinutes(userId) {
   return offence < SPAM_TIMERS.length ? SPAM_TIMERS[offence] : null;
 }
 
+function getSlurMinutes(userId) {
+  const offence = spamOffences[userId + '_slur'] || 0;
+  return offence < SLUR_TIMERS.length ? SLUR_TIMERS[offence] : null;
+}
+
 function trackMessage(userId, text) {
   if (!messageHistory[userId]) messageHistory[userId] = [];
   messageHistory[userId].push(text);
   if (messageHistory[userId].length > 8) messageHistory[userId].shift();
 
-  // Check if recent messages spell out a slur letter by letter
   const recentMsgs = messageHistory[userId] || [];
   const singleChars = recentMsgs.filter(function(m) { return m.trim().length <= 2; });
   if (singleChars.length >= 2) {
@@ -162,7 +165,6 @@ function trackMessage(userId, text) {
       messageHistory[userId] = [];
       return 'LETTER_SLUR';
     }
-    // Also check last 3, 4, 5, 6, 7 chars as sliding window
     for (let len = 3; len <= 8; len++) {
       const slice = singleChars.slice(-len).join('').replace(/\s/g, '').toLowerCase();
       if (containsBlockedWord(slice)) {
@@ -220,10 +222,10 @@ async function prisonPlayer(userId, username, reason) {
   if (prisoned.has(userId)) return;
   prisoned.add(userId);
   delete messageHistory[userId];
-  // Track prison history
   if (!prisonHistory[userId]) prisonHistory[userId] = [];
   prisonHistory[userId].push({ reason: reason, time: new Date().toISOString(), username: username });
   savePrisonHistory();
+
   if (reason === 'Spamming') {
     const minutes = getSpamMinutes(userId);
     spamOffences[userId] = (spamOffences[userId] || 0) + 1;
@@ -243,16 +245,33 @@ async function prisonPlayer(userId, username, reason) {
       sendRcon('prison ' + userId + ' Spamming');
       sendRcon('say [5Heads Arena Bot]: ' + username + ' has been permanently prisoned for repeated spamming.');
     }
+  } else if (reason === 'HateSpeech') {
+    const minutes = getSlurMinutes(userId);
+    spamOffences[userId + '_slur'] = (spamOffences[userId + '_slur'] || 0) + 1;
+    saveOffences();
+    if (minutes !== null) {
+      await sendDiscordAlert(username, userId, 'HateSpeech', spamOffences[userId + '_slur']);
+      sendRcon('prison ' + userId + ' HateSpeech');
+      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned for hate speech. You have ' + minutes + ' minute(s) remaining.');
+      setTimeout(function() {
+        sendRcon('unjail ' + userId);
+        prisoned.delete(userId);
+        releaseCooldowns.add(userId);
+        setTimeout(function() { releaseCooldowns.delete(userId); }, 60000);
+      }, minutes * 60 * 1000);
+    } else {
+      await sendDiscordAlert(username, userId, 'HateSpeech', null);
+      sendRcon('prison ' + userId + ' HateSpeech');
+      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been permanently prisoned for repeated hate speech.');
+    }
   } else {
     await sendDiscordAlert(username, userId, reason, null);
-    console.log('[PRISON RCON] prison ' + userId + ' ' + reason);
     sendRcon('prison ' + userId + ' ' + reason);
     if (reason === 'Threats') {
       sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned for making threats.');
     } else {
-      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned for using hate speech.');
+      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned.');
     }
-    // Remove from prisoned set after 30s so re-detection works if admin unjails them
     setTimeout(function() { prisoned.delete(userId); }, 30000);
   }
 }
@@ -280,7 +299,6 @@ function connect() {
   ws.on('message', async function(data) {
     try {
       const msg = JSON.parse(data.toString());
-      // Handle voice clip file paths from VoiceMonitor
       if (msg.Type === 'Generic' && msg.Message && msg.Message.includes('[VOICECLIP] ')) {
         const line = msg.Message.slice(msg.Message.indexOf('[VOICECLIP] ') + 12).trim();
         const parts = line.split(' ');
@@ -293,24 +311,20 @@ function connect() {
         return;
       }
 
-      // Handle voice transcripts from Generic console output
       if (msg.Type === 'Generic' && msg.Message && msg.Message.includes('[VOICETRANSCRIPT]')) {
         const line = msg.Message.slice(msg.Message.indexOf('[VOICETRANSCRIPT] ') + 18).trim();
         const parts = line.trim().split(/\s+/);
         const voiceSteamId = parts[0];
         const voiceUsername = parts[1];
         const voiceText = parts.slice(2).join(' ').toLowerCase().trim();
-        // Skip short/meaningless transcripts
         const skipWords = ['you', 'yeah', 'yes', 'no', 'ok', 'okay', 'hi', 'hey', 'uh', 'um', 'hmm', '...', '.', 'the', 'a'];
         if (!voiceText || voiceText.length < 4 || skipWords.includes(voiceText.trim())) return;
         console.log('[VOICE MOD] ' + voiceUsername + ': ' + voiceText);
 
-        // Check blocklist first
         console.log('[VOICE CHECK] text="' + voiceText + '" blocked=' + containsBlockedWord(voiceText) + ' prisoned=' + prisoned.has(voiceSteamId));
         if (prisoned.has(voiceSteamId)) return;
         if (containsBlockedWord(voiceText)) {
           await prisonPlayer(voiceSteamId, voiceUsername, 'HateSpeech');
-          // Send audio recording to Discord recordings channel
           if (DISCORD_RECORDINGS_WEBHOOK && global.pendingAudio && global.pendingAudio[voiceSteamId]) {
             try {
               const audioData = global.pendingAudio[voiceSteamId];
@@ -328,7 +342,7 @@ function connect() {
                   headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary },
                   body: body
                 }).catch(function(e) { console.error('Recordings webhook error:', e.message); });
-                fs.unlinkSync(audioData.path); // delete clip after upload
+                fs.unlinkSync(audioData.path);
               }
               delete global.pendingAudio[voiceSteamId];
             } catch(e) { console.error('Audio upload error:', e.message); }
@@ -339,7 +353,6 @@ function connect() {
           return;
         }
 
-        // AI threat check
         const vThreat = await callAI("Rust game server voice chat moderation. Does this contain a REAL serious threat like telling someone to kill themselves or explicit violent threats toward a real person? Gaming callouts like run you over, shoot you, kill you in game are NOT threats. Answer yes or no only. Message: \"" + voiceText + "\"", 5);
         if (vThreat === 'yes') {
           await prisonPlayer(voiceSteamId, voiceUsername, 'Threats');
@@ -349,7 +362,6 @@ function connect() {
           return;
         }
 
-        // AI slur check
         const vSlur = await callAI('You are moderating a Rust game server voice chat. Speech-to-text software censors slurs by replacing them with similar sounding words. Does this transcript likely contain a racial slur, hate speech, or threat even if the slur was replaced by a similar word like nerd, bigger, digger, trigger, figure, sugar, mother, etc? Consider the full sentence context.' + getVoiceExamplePrompt() + ' Reply yes or no only. Message: "' + voiceText + '"', 5);
         addVoiceExample(voiceText, vSlur === 'yes');
         if (vSlur === 'yes') {
@@ -361,7 +373,6 @@ function connect() {
         return;
       }
 
-      // Handle AssemblyAI flagged voice content
       if (msg.Type === 'Generic' && msg.Message && msg.Message.includes('[VOICE FLAGGED]')) {
         const line = msg.Message.slice(msg.Message.indexOf('[VOICE FLAGGED] ') + 16).trim();
         const parenStart = line.indexOf('(');
@@ -400,7 +411,6 @@ function connect() {
       const text = extractPlayerMessage(rawText).toLowerCase();
       console.log('[CHAT] ' + username + ': ' + text);
 
-      // Admin commands
       if (text.startsWith('!voiceteach ')) {
         const parts = text.slice(12).trim().split(' ');
         const result = parts[0]; const phrase = parts.slice(1).join(' ');
@@ -413,6 +423,7 @@ function connect() {
         if (!ADMIN_IDS.includes(userId)) return;
         const target = text.slice(9).trim();
         const spamCount = spamOffences[target] || 0;
+        const slurCount = spamOffences[target + '_slur'] || 0;
         const inPrison = prisoned.has(target);
         const history = prisonHistory[target] || [];
         const hateSpeech = history.filter(function(h) { return h.reason === 'HateSpeech'; }).length;
@@ -420,13 +431,13 @@ function connect() {
         const lastPrison = history.length > 0 ? history[history.length-1] : null;
         const msg = 'History for ' + target + '\n' +
           'Spam offences: ' + spamCount + '\n' +
+          'Hate speech offences: ' + slurCount + '\n' +
           'Hate speech prisons: ' + hateSpeech + '\n' +
           'Threat prisons: ' + threats + '\n' +
           'Total prisons: ' + history.length + '\n' +
           (lastPrison ? 'Last prison: ' + lastPrison.reason + ' at ' + lastPrison.time : 'No prison history') + '\n' +
           (inPrison ? '⚠️ Currently PRISONED' : '✅ Not in prison');
         console.log('[HISTORY] ' + msg);
-        // Send privately via Discord
         const histWebhook = DISCORD_HISTORY_WEBHOOK || DISCORD_WEBHOOK;
         if (histWebhook) {
           try {
@@ -462,7 +473,6 @@ if (text.startsWith('!block ')) {
 
       if (prisoned.has(userId) || releaseCooldowns.has(userId)) return;
 
-      // Handle voice transcripts from VoiceMonitor plugin
       if (msg.Type === 'Generic' && rawText && rawText.startsWith('voicetranscript ')) {
         const parts = rawText.slice(16).split(' ');
         const voiceUserId = parts[0];
@@ -485,13 +495,11 @@ if (text.startsWith('!block ')) {
         return;
       }
 
-      // 1. Instant blocklist check
       if (containsBlockedWord(text)) {
         console.log('[BLOCKLIST] caught: ' + text);
         await prisonPlayer(userId, username, 'HateSpeech'); return;
       }
 
-      // 2. AI spam check
       const letterSlur = trackMessage(userId, text);
       if (letterSlur === 'LETTER_SLUR') {
         console.log('[LETTER BYPASS] ' + username + ' spelled out a slur');
@@ -499,7 +507,6 @@ if (text.startsWith('!block ')) {
         return;
       }
       const history = messageHistory[userId] || [];
-      // Check for single letter spam separately
       const recentAll = history.slice(-6);
       const singleLetterCount = recentAll.filter(function(m) { return m.trim().length <= 2; }).length;
       if (singleLetterCount >= 5) {
@@ -515,13 +522,11 @@ if (text.startsWith('!block ')) {
         if (spamResult === 'yes') { await prisonPlayer(userId, username, 'Spamming'); return; }
       }
 
-      // 3. AI threat check
       const threatPrompt = "You are a multilingual content moderator for a Rust game server. Does this message contain a REAL serious threat — like telling someone to kill themselves, wishing death, or explicit violent threats toward a real person? Gaming context like I will kill you in game, run you over, shoot you, raid you are NOT threats. Casual trash talk is NOT a threat. Only flag genuinely alarming messages directed at a real person outside of gameplay. Answer yes or no only. Message: \"" + text + "\"";
       const threatResult = await callAI(threatPrompt, 5);
       console.log('[THREAT] ' + username + ': ' + threatResult);
       if (threatResult === 'yes') { await prisonPlayer(userId, username, 'Threats'); return; }
 
-      // 4. AI slur check
       const notSlurExamples = (savedExamples['notSlur'] || []).slice(-10).join(', ');
       const slurExamples = (savedExamples['slur'] || []).slice(-10).join(', ');
       const slurContext = (notSlurExamples ? ' These are NOT slurs — they are just vulgar words or gaming terms: ' + notSlurExamples + '.' : '') + (slurExamples ? ' These ARE slurs: ' + slurExamples + '.' : '');
@@ -534,33 +539,30 @@ if (text.startsWith('!block ')) {
         return;
       }
 
-      // 5. Info commands
 } catch(e) { console.log('Error:', e.message); }
   });
 
   ws.on('close', function() {
     console.log('Disconnected, reconnecting in 5s...');
-    // Start offline timer - alert after 2 minutes offline
     if (!offlineTimer) {
       offlineTimer = setTimeout(async function() {
         if (!offlineAlertSent && DISCORD_WEBHOOK) {
           offlineAlertSent = true;
           console.log('[OFFLINE ALERT] Bot has been offline for 2 minutes — sending Discord alert');
           try {
-            await fetch(alertWebhook, {
+            await fetch(DISCORD_WEBHOOK, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ embeds: [{ title: '⚠️ Ruscar Bot OFFLINE', color: 15158332, description: 'The moderation bot has been disconnected for over 2 minutes. Chat is **unmonitored**.', timestamp: new Date().toISOString() }] })
             });
           } catch(e) { console.log('Failed to send offline alert:', e.message); }
         }
-      }, 120000); // 2 minutes
+      }, 120000);
     }
     setTimeout(connect, 5000);
   });
 
   ws.on('open', function() {
-    // Clear offline timer and send online alert if we were offline
     if (offlineTimer) { clearTimeout(offlineTimer); offlineTimer = null; }
     if (offlineAlertSent) {
       offlineAlertSent = false;
