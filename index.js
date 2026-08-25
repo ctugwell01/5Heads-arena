@@ -400,6 +400,67 @@ function connect() {
         return;
       }
 
+      // Handle VIPChat plugin console output
+      if (msg.Type === 'Generic' && msg.Message && msg.Message.includes('[CHAT]')) {
+        const chatIdx = msg.Message.indexOf('[CHAT]') + 6;
+        const line = msg.Message.slice(chatIdx).replace(/^\s*\]/, '').trim();
+        const parts = line.split(' ');
+        const userId = parts[0];
+        const username = parts[1];
+        const rawText = parts.slice(2).join(' ').replace(/^:\s*/, '');
+        if (!rawText || userId === '0' || username === 'SERVER') return;
+        const text = rawText.toLowerCase();
+        console.log('[VIPCHAT] ' + username + ': ' + text);
+
+        if (prisoned.has(userId) || releaseCooldowns.has(userId)) return;
+
+        if (containsBlockedWord(text)) {
+          console.log('[BLOCKLIST] caught: ' + text);
+          await prisonPlayer(userId, username, 'HateSpeech'); return;
+        }
+
+        const letterSlur = trackMessage(userId, text);
+        if (letterSlur === 'LETTER_SLUR') {
+          console.log('[LETTER BYPASS] ' + username + ' spelled out a slur');
+          await prisonPlayer(userId, username, 'HateSpeech'); return;
+        }
+
+        const history = messageHistory[userId] || [];
+        const recentAll = history.slice(-6);
+        const singleLetterCount = recentAll.filter(function(m) { return m.trim().length <= 2; }).length;
+        if (singleLetterCount >= 5) {
+          console.log('[SPAM] ' + username + ': single letter spam');
+          await prisonPlayer(userId, username, 'Spamming'); return;
+        }
+
+        const meaningfulHistory = history.filter(function(m) { return m.length > 3; });
+        if (meaningfulHistory.length >= 4) {
+          const histText = meaningfulHistory.map(function(m, i) { return (i+1) + '. "' + m + '"'; }).join(' | ');
+          const spamPrompt = "Spam detector for Rust game server. Recent messages: " + histText + " Is this spam? Spam means: same message copy pasted 3+ times, keyboard mashing like asdasd or aaaaaaa, flooding. NOT spam: normal conversation, celebrating, short replies like gg lol ok yes, different messages, gaming callouts. Reply yes or no only.";
+          const spamResult = await callAI(spamPrompt, 5);
+          console.log('[AI SPAM] ' + username + ': ' + spamResult);
+          if (spamResult === 'yes') { await prisonPlayer(userId, username, 'Spamming'); return; }
+        }
+
+        const threatPrompt = "You are a multilingual content moderator for a Rust game server. Does this message contain a REAL serious threat — like telling someone to kill themselves, wishing death, or explicit violent threats toward a real person? Gaming context like I will kill you in game, run you over, shoot you, raid you are NOT threats. Casual trash talk is NOT a threat. Only flag genuinely alarming messages directed at a real person outside of gameplay. Answer yes or no only. Message: \"" + text + "\"";
+        const threatResult = await callAI(threatPrompt, 5);
+        console.log('[THREAT] ' + username + ': ' + threatResult);
+        if (threatResult === 'yes') { await prisonPlayer(userId, username, 'Threats'); return; }
+
+        const notSlurExamples = (savedExamples['notSlur'] || []).slice(-10).join(', ');
+        const slurExamples = (savedExamples['slur'] || []).slice(-10).join(', ');
+        const slurContext = (notSlurExamples ? ' These are NOT slurs — they are just vulgar words or gaming terms: ' + notSlurExamples + '.' : '') + (slurExamples ? ' These ARE slurs: ' + slurExamples + '.' : '');
+        const slurPrompt = 'You are a multilingual content moderator for a game server. Does this message contain racial slurs, hate speech, homophobic slurs, or derogatory terms targeting someone based on race, ethnicity, religion, sexuality, or nationality? Generic swear words like fuck, shit, dick, cock in any language do NOT count.' + slurContext + ' Answer yes or no only. Message: "' + text + '"';
+        const slurResult = await callAI(slurPrompt, 5);
+        console.log('[SLUR] ' + username + ': ' + slurResult);
+        if (slurResult === 'yes') {
+          if (warnedPlayers.has(userId)) { await prisonPlayer(userId, username, 'HateSpeech'); warnedPlayers.delete(userId); }
+          else { warnedPlayers.add(userId); sendRcon('say [5Heads Arena Bot]: WARNING ' + username + ' - inappropriate language. Next offence = prison.'); }
+          return;
+        }
+        return;
+      }
+
       if (msg.Type !== 'Chat') return;
       let inner;
       try { inner = JSON.parse(msg.Message); } catch { return; }
