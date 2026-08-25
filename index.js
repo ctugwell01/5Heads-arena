@@ -293,7 +293,7 @@ function connect() {
 
   ws.on('open', function() {
     console.log('Connected to Rust RCON!');
-    setTimeout(function() {  }, 2000);
+    setTimeout(function() { sendRcon('say [5Head Arena Bot]: 5Head Arena Bot loaded and monitoring chat.'); }, 2000);
   });
 
   ws.on('message', async function(data) {
