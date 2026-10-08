@@ -109,7 +109,7 @@ let ws;
 let counter = 1;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
-let heartbeatTimer = null;
+let startupAnnouncementSent = false;
 
 function containsBlockedWord(text) {
   if (BLOCKED_WORDS.some(function(w) { return text.includes(w); })) return true;
@@ -194,22 +194,6 @@ function scheduleReconnect() {
     reconnectTimer = null;
     connect();
   }, delay);
-}
-
-function startHeartbeat() {
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
-  ws.isAlive = true;
-  ws.on('pong', function() { ws.isAlive = true; });
-  heartbeatTimer = setInterval(function() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (ws.isAlive === false) {
-      console.error('[RCON] Heartbeat timed out; terminating stale connection');
-      ws.terminate();
-      return;
-    }
-    ws.isAlive = false;
-    ws.ping();
-  }, 30000);
 }
 
 async function callAI(prompt, maxTokens) {
@@ -330,8 +314,10 @@ function connect() {
   ws.on('open', function() {
     reconnectAttempts = 0;
     console.log('[RCON] Connected to Rust RCON');
-    startHeartbeat();
-    setTimeout(function() { sendRcon('say [5Heads Arena Bot]: Loaded and monitoring chat.'); }, 2000);
+    if (!startupAnnouncementSent) {
+      startupAnnouncementSent = true;
+      setTimeout(function() { sendRcon('say [5Heads Arena Bot]: Loaded and monitoring chat.'); }, 2000);
+    }
   });
 
   ws.on('message', async function(data) {
@@ -642,7 +628,7 @@ if (text.startsWith('!block ')) {
   });
 
   ws.on('close', function(code, reasonBuffer) {
-    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    ws = null;
     const reason = reasonBuffer ? reasonBuffer.toString() : '';
     console.error('[RCON] Disconnected. code=' + code + (reason ? ' reason=' + reason : ''));
     if (!offlineTimer) {
