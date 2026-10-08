@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const fs = require('fs');
+const http = require('http');
 
 const RCON_HOST = process.env.RCON_HOST;
 const RCON_PORT = process.env.RCON_PORT || '28152';
@@ -11,13 +12,18 @@ const DISCORD_RECORDINGS_WEBHOOK = process.env.DISCORD_RECORDINGS_WEBHOOK;
 const DISCORD_PRISON_LOG_WEBHOOK = process.env.DISCORD_PRISON_LOG_WEBHOOK;
 const DISCORD_HISTORY_WEBHOOK = process.env.DISCORD_HISTORY_WEBHOOK;
 
-const EXAMPLES_FILE = '/tmp/bot_examples.json';
-const BLOCKED_FILE  = '/tmp/blocked_words.json';
-const OFFENCES_FILE  = '/tmp/spam_offences.json';
-const HISTORY_FILE   = '/tmp/prison_history.json';
+const DATA_DIR = process.env.DATA_DIR || (process.env.RAILWAY_ENVIRONMENT ? '/data' : '/tmp');
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {
+  console.error('[STORAGE] Could not create data directory ' + DATA_DIR + ':', e.message);
+  process.exit(1);
+}
+const EXAMPLES_FILE = DATA_DIR + '/bot_examples.json';
+const BLOCKED_FILE  = DATA_DIR + '/blocked_words.json';
+const OFFENCES_FILE = DATA_DIR + '/spam_offences.json';
+const HISTORY_FILE  = DATA_DIR + '/prison_history.json';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO  = process.env.GITHUB_REPO || 'ctugwell01/skybox-bot';
-const GITHUB_PATH  = process.env.GITHUB_PATH || 'prison_history.json';
+const GITHUB_REPO  = process.env.GITHUB_REPO || 'ctugwell01/5Heads-arena';
+const GITHUB_PATH  = process.env.GITHUB_PATH || 'prison_history_arena.json';
 
 async function loadHistoryFromGitHub() {
   if (!GITHUB_TOKEN) { console.log('[GITHUB] No token set'); return; }
@@ -39,28 +45,6 @@ async function loadHistoryFromGitHub() {
   } catch(e) { console.log('[GITHUB] Failed to load history:', e.message); }
 }
 
-async function saveHistoryToGitHub() {
-  if (!GITHUB_TOKEN) { console.log('[GITHUB] No token set'); return; }
-  console.log('[GITHUB] Saving to ' + GITHUB_REPO + '/' + GITHUB_PATH);
-  try {
-    const getRes = await fetch('https://api.github.com/repos/' + GITHUB_REPO + '/contents/' + GITHUB_PATH, {
-      headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
-    });
-    console.log('[GITHUB] Get SHA response: ' + getRes.status);
-    const sha = getRes.ok ? (await getRes.json()).sha : undefined;
-    const body = { message: 'Update prison history', content: Buffer.from(JSON.stringify(prisonHistory, null, 2)).toString('base64') };
-    if (sha) body.sha = sha;
-    const putRes = await fetch('https://api.github.com/repos/' + GITHUB_REPO + '/contents/' + GITHUB_PATH, {
-      method: 'PUT',
-      headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    console.log('[GITHUB] Save response: ' + putRes.status);
-    if (!putRes.ok) { const err = await putRes.text(); console.log('[GITHUB] Save error: ' + err); }
-    else console.log('[GITHUB] Prison history saved');
-  } catch(e) { console.log('[GITHUB] Failed to save history:', e.message); }
-}
-
 let savedExamples = {};
 try { if (fs.existsSync(EXAMPLES_FILE)) { savedExamples = JSON.parse(fs.readFileSync(EXAMPLES_FILE, 'utf8')); console.log('Loaded ' + Object.keys(savedExamples).length + ' example categories'); } } catch(e) {}
 
@@ -71,7 +55,7 @@ if (!savedExamples['notSlur']) savedExamples['notSlur'] = [];
   if (!savedExamples['notSlur'].includes(w)) savedExamples['notSlur'].push(w);
 });
 
-const VOICE_EXAMPLES_FILE = '/tmp/voice_examples.json';
+const VOICE_EXAMPLES_FILE = DATA_DIR + '/voice_examples.json';
 let voiceExamples = { slur: [], clean: [] };
 try { if (fs.existsSync(VOICE_EXAMPLES_FILE)) { voiceExamples = JSON.parse(fs.readFileSync(VOICE_EXAMPLES_FILE, 'utf8')); console.log('Loaded ' + voiceExamples.slur.length + ' voice slur examples, ' + voiceExamples.clean.length + ' clean examples'); } } catch(e) {}
 function saveVoiceExamples() { fs.writeFileSync(VOICE_EXAMPLES_FILE, JSON.stringify(voiceExamples, null, 2)); }
@@ -102,7 +86,10 @@ function buildExamplesPrompt() {
 const spamOffences    = {};
 const prisonHistory   = {};
 try { if (fs.existsSync(HISTORY_FILE)) { const h = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); Object.assign(prisonHistory, h); console.log('Loaded prison history for ' + Object.keys(h).length + ' players'); } } catch(e) {}
-function savePrisonHistory() { fs.writeFileSync(HISTORY_FILE, JSON.stringify(prisonHistory, null, 2)); saveHistoryToGitHub(); }
+function savePrisonHistory() {
+  fs.writeFileSync(HISTORY_FILE, JSON.stringify(prisonHistory, null, 2));
+  console.log('[STORAGE] Prison history saved to ' + HISTORY_FILE);
+}
 const prisoned        = new Set();
 const releaseCooldowns = new Set();
 const warnedPlayers   = new Set();
@@ -120,6 +107,9 @@ const SPAM_TIMERS = [10, 20, 1440];
 const SLUR_TIMERS = [10, 20, 1440];
 let ws;
 let counter = 1;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let heartbeatTimer = null;
 
 function containsBlockedWord(text) {
   if (BLOCKED_WORDS.some(function(w) { return text.includes(w); })) return true;
@@ -182,7 +172,44 @@ function trackMessage(userId, text) {
 }
 
 function sendRcon(command) {
-  ws.send(JSON.stringify({ Identifier: counter++, Message: command, Name: 'Bot' }));
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.warn('[RCON] Command skipped while disconnected: ' + command);
+    return false;
+  }
+  try {
+    ws.send(JSON.stringify({ Identifier: counter++, Message: command, Name: 'Bot' }));
+    return true;
+  } catch (e) {
+    console.error('[RCON] Failed to send command:', e.message);
+    return false;
+  }
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  const delay = Math.min(30000, 5000 * Math.pow(2, Math.min(reconnectAttempts, 3)));
+  reconnectAttempts += 1;
+  console.log('[RCON] Reconnecting in ' + Math.round(delay / 1000) + 's...');
+  reconnectTimer = setTimeout(function() {
+    reconnectTimer = null;
+    connect();
+  }, delay);
+}
+
+function startHeartbeat() {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  ws.isAlive = true;
+  ws.on('pong', function() { ws.isAlive = true; });
+  heartbeatTimer = setInterval(function() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (ws.isAlive === false) {
+      console.error('[RCON] Heartbeat timed out; terminating stale connection');
+      ws.terminate();
+      return;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  }, 30000);
 }
 
 async function callAI(prompt, maxTokens) {
@@ -287,13 +314,24 @@ let offlineAlertSent = false;
 let offlineTimer = null;
 
 function connect() {
-  const url = 'ws://' + RCON_HOST + ':' + RCON_PORT + '/' + RCON_PASS;
-  console.log('Connecting...');
-  ws = new WebSocket(url);
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+  const host = String(RCON_HOST || '').trim().replace(/^wss?:\/\//i, '').replace(/\/+$/, '');
+  const scheme = process.env.RCON_SECURE === '1' ? 'wss' : 'ws';
+  const url = scheme + '://' + host + ':' + RCON_PORT + '/' + encodeURIComponent(RCON_PASS);
+  console.log('[RCON] Connecting to ' + scheme + '://' + host + ':' + RCON_PORT + '/<redacted>');
+
+  ws = new WebSocket(url, { handshakeTimeout: 10000, perMessageDeflate: false });
+
+  ws.on('unexpected-response', function(_request, response) {
+    console.error('[RCON] Handshake rejected with HTTP ' + response.statusCode + ' ' + (response.statusMessage || ''));
+  });
 
   ws.on('open', function() {
-    console.log('Connected to Rust RCON!');
-    setTimeout(function() { sendRcon('say [5Head Arena Bot]: Loaded and monitoring chat.'); }, 2000);
+    reconnectAttempts = 0;
+    console.log('[RCON] Connected to Rust RCON');
+    startHeartbeat();
+    setTimeout(function() { sendRcon('say [5Heads Arena Bot]: Loaded and monitoring chat.'); }, 2000);
   });
 
   ws.on('message', async function(data) {
@@ -603,8 +641,10 @@ if (text.startsWith('!block ')) {
 } catch(e) { console.log('Error:', e.message); }
   });
 
-  ws.on('close', function() {
-    console.log('Disconnected, reconnecting in 5s...');
+  ws.on('close', function(code, reasonBuffer) {
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    const reason = reasonBuffer ? reasonBuffer.toString() : '';
+    console.error('[RCON] Disconnected. code=' + code + (reason ? ' reason=' + reason : ''));
     if (!offlineTimer) {
       offlineTimer = setTimeout(async function() {
         if (!offlineAlertSent && DISCORD_WEBHOOK) {
@@ -620,7 +660,7 @@ if (text.startsWith('!block ')) {
         }
       }, 120000);
     }
-    setTimeout(connect, 5000);
+    scheduleReconnect();
   });
 
   ws.on('open', function() {
@@ -637,10 +677,49 @@ if (text.startsWith('!block ')) {
     }
   });
 
-  ws.on('error', function(err) { console.error('WS Error:', err.message); });
+  ws.on('error', function(err) {
+    console.error('[RCON] Error' + (err.code ? ' ' + err.code : '') + ': ' + err.message);
+  });
 }
 
-if (!RCON_HOST || !RCON_PASS) { console.error('Missing RCON_HOST or RCON_PASS!'); process.exit(1); }
+function validateConfig() {
+  const missing = [];
+  if (!RCON_HOST) missing.push('RCON_HOST');
+  if (!RCON_PASS) missing.push('RCON_PASS');
+  if (!RCON_PORT) missing.push('RCON_PORT');
+  if (missing.length) {
+    console.error('[CONFIG] Missing required variables: ' + missing.join(', '));
+    return false;
+  }
+  if (!ANTHROPIC_API_KEY) {
+    if (process.env.ANTHROPIC_API_KE) console.error('[CONFIG] ANTHROPIC_API_KE is set, but the bot expects ANTHROPIC_API_KEY (missing Y).');
+    else console.warn('[CONFIG] ANTHROPIC_API_KEY is not set; AI moderation will not work.');
+  }
+  if (/^wss?:\/\//i.test(String(RCON_HOST))) console.warn('[CONFIG] RCON_HOST should normally be host/IP only; the scheme will be stripped automatically.');
+  console.log('[CONFIG] RCON target: ' + String(RCON_HOST).replace(/^wss?:\/\//i, '') + ':' + RCON_PORT);
+  console.log('[CONFIG] Persistent data directory: ' + DATA_DIR);
+  return true;
+}
+
+function startHealthServer() {
+  const port = Number(process.env.PORT || 3000);
+  const server = http.createServer(function(req, res) {
+    if (req.url !== '/' && req.url !== '/health' && req.url !== '/ready') {
+      res.statusCode = 404;
+      res.end('Not found');
+      return;
+    }
+    const connected = !!ws && ws.readyState === WebSocket.OPEN;
+    const payload = JSON.stringify({ status: 'ok', rcon: connected ? 'connected' : 'disconnected', uptimeSeconds: Math.floor(process.uptime()) });
+    res.setHeader('Content-Type', 'application/json');
+    res.statusCode = req.url === '/ready' && !connected ? 503 : 200;
+    res.end(payload);
+  });
+  server.listen(port, '0.0.0.0', function() { console.log('[HEALTH] Listening on port ' + port); });
+}
+
+if (!validateConfig()) process.exit(1);
 console.log('5Heads Arena Bot started...');
+startHealthServer();
 loadHistoryFromGitHub();
 connect();
