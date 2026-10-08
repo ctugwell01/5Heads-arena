@@ -45,28 +45,6 @@ async function loadHistoryFromGitHub() {
   } catch(e) { console.log('[GITHUB] Failed to load history:', e.message); }
 }
 
-async function saveHistoryToGitHub() {
-  if (!GITHUB_TOKEN) { console.log('[GITHUB] No token set'); return; }
-  console.log('[GITHUB] Saving to ' + GITHUB_REPO + '/' + GITHUB_PATH);
-  try {
-    const getRes = await fetch('https://api.github.com/repos/' + GITHUB_REPO + '/contents/' + GITHUB_PATH, {
-      headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
-    });
-    console.log('[GITHUB] Get SHA response: ' + getRes.status);
-    const sha = getRes.ok ? (await getRes.json()).sha : undefined;
-    const body = { message: 'Update prison history', content: Buffer.from(JSON.stringify(prisonHistory, null, 2)).toString('base64') };
-    if (sha) body.sha = sha;
-    const putRes = await fetch('https://api.github.com/repos/' + GITHUB_REPO + '/contents/' + GITHUB_PATH, {
-      method: 'PUT',
-      headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    console.log('[GITHUB] Save response: ' + putRes.status);
-    if (!putRes.ok) { const err = await putRes.text(); console.log('[GITHUB] Save error: ' + err); }
-    else console.log('[GITHUB] Prison history saved');
-  } catch(e) { console.log('[GITHUB] Failed to save history:', e.message); }
-}
-
 let savedExamples = {};
 try { if (fs.existsSync(EXAMPLES_FILE)) { savedExamples = JSON.parse(fs.readFileSync(EXAMPLES_FILE, 'utf8')); console.log('Loaded ' + Object.keys(savedExamples).length + ' example categories'); } } catch(e) {}
 
@@ -77,7 +55,7 @@ if (!savedExamples['notSlur']) savedExamples['notSlur'] = [];
   if (!savedExamples['notSlur'].includes(w)) savedExamples['notSlur'].push(w);
 });
 
-const VOICE_EXAMPLES_FILE = '/tmp/voice_examples.json';
+const VOICE_EXAMPLES_FILE = DATA_DIR + '/voice_examples.json';
 let voiceExamples = { slur: [], clean: [] };
 try { if (fs.existsSync(VOICE_EXAMPLES_FILE)) { voiceExamples = JSON.parse(fs.readFileSync(VOICE_EXAMPLES_FILE, 'utf8')); console.log('Loaded ' + voiceExamples.slur.length + ' voice slur examples, ' + voiceExamples.clean.length + ' clean examples'); } } catch(e) {}
 function saveVoiceExamples() { fs.writeFileSync(VOICE_EXAMPLES_FILE, JSON.stringify(voiceExamples, null, 2)); }
