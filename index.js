@@ -1,6 +1,7 @@
 const WebSocket = require('ws');
 const fs = require('fs');
 const http = require('http');
+const { buildPrisonEmbeds } = require('./prison-logs');
 
 const RCON_HOST = process.env.RCON_HOST;
 const RCON_PORT = process.env.RCON_PORT || '28152';
@@ -11,6 +12,15 @@ const DISCORD_VOICE_WEBHOOK = process.env.DISCORD_VOICE_WEBHOOK;
 const DISCORD_RECORDINGS_WEBHOOK = process.env.DISCORD_RECORDINGS_WEBHOOK;
 const DISCORD_PRISON_LOG_WEBHOOK = process.env.DISCORD_PRISON_LOG_WEBHOOK;
 const DISCORD_HISTORY_WEBHOOK = process.env.DISCORD_HISTORY_WEBHOOK;
+
+// The VIP channel sees only who was jailed and when; the private owner channel sees why.
+// A webhook targets its own Discord channel. Without webhooks, a bot token can post
+// directly to these channel IDs (taken from the owner's Discord channel links).
+const DISCORD_VIP_LOG_WEBHOOK = process.env.DISCORD_VIP_LOG_WEBHOOK;
+const DISCORD_OWNER_LOG_WEBHOOK = process.env.DISCORD_OWNER_LOG_WEBHOOK;
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const DISCORD_VIP_CHANNEL_ID = process.env.DISCORD_VIP_CHANNEL_ID || '1558442485364293682';
+const DISCORD_OWNER_CHANNEL_ID = process.env.DISCORD_OWNER_CHANNEL_ID || '1558850603533213867';
 
 const DATA_DIR = process.env.DATA_DIR || (process.env.RAILWAY_ENVIRONMENT ? '/data' : '/tmp');
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {
@@ -216,17 +226,45 @@ async function callAI(prompt, maxTokens) {
   }
 }
 
-async function sendDiscordAlert(username, userId, reason, offence) {
-  const alertWebhook = DISCORD_PRISON_LOG_WEBHOOK || DISCORD_WEBHOOK;
-  if (!alertWebhook) return;
+async function postPrisonLog(label, webhook, channelId, embed) {
+  // Fail closed: never send a reason-bearing owner log to the generic Discord
+  // webhook, which may target a publicly visible channel.
+  if (!webhook && !DISCORD_BOT_TOKEN) {
+    console.warn('[DISCORD] ' + label + ' prison logging is not configured (set its webhook or DISCORD_BOT_TOKEN)');
+    return false;
+  }
+  const url = webhook || 'https://discord.com/api/v10/channels/' + channelId + '/messages';
+  const headers = { 'Content-Type': 'application/json' };
+  if (!webhook) headers.Authorization = 'Bot ' + DISCORD_BOT_TOKEN;
+
   try {
-    await fetch(alertWebhook, {
+    const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ embeds: [{ title: 'Player Auto Prisoned', color: reason === 'HateSpeech' ? 15158332 : 15105570, fields: [{ name: 'Player', value: username, inline: true }, { name: 'Reason', value: reason, inline: true }, { name: 'Steam Profile', value: 'https://steamcommunity.com/profiles/' + userId, inline: false }, { name: 'Offence', value: offence ? '#' + offence : 'Permanent', inline: true }], timestamp: new Date().toISOString() }] })
+      headers,
+      body: JSON.stringify({
+        embeds: [embed],
+        allowed_mentions: { parse: [] }
+      })
     });
-    console.log('Discord alert sent for ' + username);
-  } catch(e) { console.error('Discord error:', e.message); }
+    if (!response.ok) {
+      console.error('[DISCORD] ' + label + ' prison log failed, HTTP ' + response.status);
+      return false;
+    }
+    console.log('[DISCORD] ' + label + ' prison log delivered');
+    return true;
+  } catch (e) {
+    console.error('[DISCORD] ' + label + ' prison log error: ' + e.message);
+    return false;
+  }
+}
+
+async function sendDiscordAlert(username, userId, reason, offence, time) {
+  const embeds = buildPrisonEmbeds(username, userId, reason, offence, time);
+  // Send separate payloads: only the owner channel ever receives the reason.
+  await Promise.all([
+    postPrisonLog('OWNER', DISCORD_OWNER_LOG_WEBHOOK, DISCORD_OWNER_CHANNEL_ID, embeds.owner),
+    postPrisonLog('VIP', DISCORD_VIP_LOG_WEBHOOK, DISCORD_VIP_CHANNEL_ID, embeds.vip)
+  ]);
 }
 
 async function prisonPlayer(userId, username, reason) {
@@ -234,7 +272,8 @@ async function prisonPlayer(userId, username, reason) {
   prisoned.add(userId);
   delete messageHistory[userId];
   if (!prisonHistory[userId]) prisonHistory[userId] = [];
-  prisonHistory[userId].push({ reason: reason, time: new Date().toISOString(), username: username });
+  const imprisonedAt = new Date().toISOString();
+  prisonHistory[userId].push({ reason: reason, time: imprisonedAt, username: username });
   savePrisonHistory();
 
   if (reason === 'Spamming') {
@@ -242,7 +281,7 @@ async function prisonPlayer(userId, username, reason) {
     spamOffences[userId] = (spamOffences[userId] || 0) + 1;
     saveOffences();
     if (minutes !== null) {
-      await sendDiscordAlert(username, userId, 'Spamming', spamOffences[userId]);
+      await sendDiscordAlert(username, userId, 'Spamming', spamOffences[userId], imprisonedAt);
       sendRcon('prison ' + userId + ' Spamming');
       sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned for spamming. You have ' + minutes + ' minute(s) remaining.');
       setTimeout(function() {
@@ -252,7 +291,7 @@ async function prisonPlayer(userId, username, reason) {
         setTimeout(function() { releaseCooldowns.delete(userId); }, 60000);
       }, minutes * 60 * 1000);
     } else {
-      await sendDiscordAlert(username, userId, 'Spamming', spamOffences[userId]);
+      await sendDiscordAlert(username, userId, 'Spamming', spamOffences[userId], imprisonedAt);
       sendRcon('prison ' + userId + ' Spamming');
       sendRcon('say [5Heads Arena Bot]: ' + username + ' has been permanently prisoned for repeated spamming.');
     }
@@ -261,7 +300,7 @@ async function prisonPlayer(userId, username, reason) {
     spamOffences[userId + '_slur'] = (spamOffences[userId + '_slur'] || 0) + 1;
     saveOffences();
     if (minutes !== null) {
-      await sendDiscordAlert(username, userId, 'HateSpeech', spamOffences[userId + '_slur']);
+      await sendDiscordAlert(username, userId, 'HateSpeech', spamOffences[userId + '_slur'], imprisonedAt);
       sendRcon('prison ' + userId + ' HateSpeech');
       sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned for hate speech. You have ' + minutes + ' minute(s) remaining.');
       setTimeout(function() {
@@ -271,12 +310,12 @@ async function prisonPlayer(userId, username, reason) {
         setTimeout(function() { releaseCooldowns.delete(userId); }, 60000);
       }, minutes * 60 * 1000);
     } else {
-      await sendDiscordAlert(username, userId, 'HateSpeech', null);
+      await sendDiscordAlert(username, userId, 'HateSpeech', null, imprisonedAt);
       sendRcon('prison ' + userId + ' HateSpeech');
       sendRcon('say [5Heads Arena Bot]: ' + username + ' has been permanently prisoned for repeated hate speech.');
     }
   } else {
-    await sendDiscordAlert(username, userId, reason, null);
+    await sendDiscordAlert(username, userId, reason, null, imprisonedAt);
     sendRcon('prison ' + userId + ' ' + reason);
     if (reason === 'Threats') {
       sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned for making threats.');
@@ -676,6 +715,9 @@ function validateConfig() {
   if (missing.length) {
     console.error('[CONFIG] Missing required variables: ' + missing.join(', '));
     return false;
+  }
+  if (!DISCORD_BOT_TOKEN && (!DISCORD_VIP_LOG_WEBHOOK || !DISCORD_OWNER_LOG_WEBHOOK)) {
+    console.warn('[CONFIG] Discord prison logs require DISCORD_BOT_TOKEN or BOTH DISCORD_VIP_LOG_WEBHOOK and DISCORD_OWNER_LOG_WEBHOOK.');
   }
   if (!ANTHROPIC_API_KEY) {
     if (process.env.ANTHROPIC_API_KE) console.error('[CONFIG] ANTHROPIC_API_KE is set, but the bot expects ANTHROPIC_API_KEY (missing Y).');
