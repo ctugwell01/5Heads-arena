@@ -40,6 +40,27 @@ You can configure delivery in Railway in **one** of two ways:
 
 Both channels receive alerts for **every** automatic prison event. The VIP channel is a redacted notification feed, not a list of VIP players. Existing in-game announcements and other voice-moderation channels are unchanged; they may still display the reason separately. Stored prison history retains the reason for moderator review.
 
+## Manual jail actions from the in-game admin UI
+
+**Important:** Discord logs created by `prisonPlayer()` only cover automatic punishments initiated by this Node bot. Manual imprisonment from an admin UI happens inside the Rust server plugin and does **not** invoke the Node bot automatically.
+
+To log manual UI imprisonment:
+
+1. Install [`server-plugin/PrisonLogBridge.cs`](server-plugin/PrisonLogBridge.cs) on the **Rust game server**, at `oxide/plugins/PrisonLogBridge.cs` (or the equivalent Carbon plugin directory). This cannot be installed by updating the Railway app.
+2. The bridge listens for Rust plugin hook `OnPlayerJail(ulong playerId, double sentenceSeconds)`, used by some Jail plugins. **Not every prison UI provides this hook.**
+3. If the UI plugin doesn't issue that hook, add the following call **after it successfully puts the player in prison**, using its own variable names and reason:
+
+   ```csharp
+   Interface.CallHook("On5HeadsPrisoned", target.UserIDString, target.displayName, reason);
+   ```
+
+   Use `"Not supplied by admin UI"` instead of `reason` when no reason is available. Some prison admin UIs have no reason entry at all.
+4. Look for a `[5HEADS_PRISON]` line in the Rust server console and `[PRISON EVENT] UI event received` and `[DISCORD] OWNER/VIP prison log delivered` in Railway logs.
+
+Both channels receive a message when a server-side bridge event is emitted; only Owner logs receive the reason. The event is saved to history with `source: "admin-ui"`. The Node bot suppresses duplicate notifications from its own auto-jail commands.
+
+**Webhook connection test (without jailing anyone):** An authorised admin (one of the Steam IDs already allowed for `!history`) can enter `!testprisonlogs` in game chat. This sends clearly marked test messages to both Discord channels and logs the delivery result in Railway. It does not jail anyone or add prison history. A Discord HTTP success only confirms webhooks; it does not confirm that the UI is sending prison events.
+
 ## Persistence
 
 Mount a Railway Volume at `/data`. The bot stores learned examples, blocklist additions, offence counts and prison history there. Runtime history is no longer committed back to GitHub, preventing moderation events from triggering new Railway deployments.
