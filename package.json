@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check prison-logs.js",
+    "check": "node --check index.js && node --check prison-logs.js && node --check manual-prison-events.js",
     "test": "node --test"
   },
   "dependencies": {
