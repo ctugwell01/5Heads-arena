@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const fs = require('fs');
 const http = require('http');
 const { buildPrisonEmbeds } = require('./prison-logs');
+const { parseManualPrisonEvent } = require('./manual-prison-events');
 
 const RCON_HOST = process.env.RCON_HOST;
 const RCON_PORT = process.env.RCON_PORT || '28152';
@@ -104,6 +105,18 @@ const prisoned        = new Set();
 const releaseCooldowns = new Set();
 const warnedPlayers   = new Set();
 const messageHistory  = {};
+const recentPrisonEvents = new Map();
+
+// Suppress duplicate logs when the UI bridge also sees a bot-originated prison.
+function recentlyLoggedPrison(userId) {
+  const now = Date.now();
+  for (const [id, time] of recentPrisonEvents) {
+    if (now - time > 15000) recentPrisonEvents.delete(id);
+  }
+  if (now - (recentPrisonEvents.get(userId) || 0) < 15000) return true;
+  recentPrisonEvents.set(userId, now);
+  return false;
+}
 
 try { if (fs.existsSync(OFFENCES_FILE)) { const l = JSON.parse(fs.readFileSync(OFFENCES_FILE, 'utf8')); Object.assign(spamOffences, l); console.log('Loaded offences for ' + Object.keys(l).length + ' players'); } } catch(e) {}
 function saveOffences() { fs.writeFileSync(OFFENCES_FILE, JSON.stringify(spamOffences, null, 2)); }
@@ -267,9 +280,44 @@ async function sendDiscordAlert(username, userId, reason, offence, time) {
   ]);
 }
 
+// Called when a Rust-side jail/prison UI plugin explicitly reports a completed
+// manual incarceration via a tagged server-console message.
+async function manualPrisonPlayer(event) {
+  if (recentlyLoggedPrison(event.userId)) {
+    console.log('[PRISON EVENT] Duplicate ignored for ' + event.userId);
+    return;
+  }
+  const imprisonedAt = new Date().toISOString();
+  if (!prisonHistory[event.userId]) prisonHistory[event.userId] = [];
+  prisonHistory[event.userId].push({
+    reason: event.reason, time: imprisonedAt, username: event.username, source: 'admin-ui'
+  });
+  savePrisonHistory();
+  console.log('[PRISON EVENT] UI event received for ' + event.userId);
+  await sendDiscordAlert(event.username, event.userId, event.reason, null, imprisonedAt);
+}
+
+async function sendPrisonTestLogs() {
+  const now = new Date().toISOString();
+  const entries = await Promise.all([
+    postPrisonLog('OWNER', DISCORD_OWNER_LOG_WEBHOOK, DISCORD_OWNER_CHANNEL_ID, {
+      title: 'Prison Logging Test — Owner Channel',
+      description: 'Test message: owner prison logging is connected. No player was imprisoned.',
+      color: 3066993, timestamp: now
+    }),
+    postPrisonLog('VIP', DISCORD_VIP_LOG_WEBHOOK, DISCORD_VIP_CHANNEL_ID, {
+      title: 'Prison Logging Test — VIP Channel',
+      description: 'Test message: VIP prison logging is connected. No player was imprisoned.',
+      color: 3066993, timestamp: now
+    })
+  ]);
+  console.log('[DISCORD TEST] Owner=' + entries[0] + ', VIP=' + entries[1]);
+}
+
 async function prisonPlayer(userId, username, reason) {
   if (prisoned.has(userId)) return;
   prisoned.add(userId);
+  recentlyLoggedPrison(userId);
   delete messageHistory[userId];
   if (!prisonHistory[userId]) prisonHistory[userId] = [];
   const imprisonedAt = new Date().toISOString();
@@ -362,6 +410,13 @@ function connect() {
   ws.on('message', async function(data) {
     try {
       const msg = JSON.parse(data.toString());
+      if (msg.Type === 'Generic') {
+        const manualEvent = parseManualPrisonEvent(msg.Message);
+        if (manualEvent) {
+          await manualPrisonPlayer(manualEvent);
+          return;
+        }
+      }
       if (msg.Type === 'Generic' && msg.Message && msg.Message.includes('[VOICECLIP] ')) {
         const line = msg.Message.slice(msg.Message.indexOf('[VOICECLIP] ') + 12).trim();
         const parts = line.split(' ');
@@ -541,6 +596,12 @@ function connect() {
         if (!phrase || (result !== 'slur' && result !== 'clean')) { sendRcon('say [5Heads Arena Bot]: Usage: !voiceteach slur/clean <phrase>'); return; }
         addVoiceExample(phrase, result === 'slur');
         sendRcon('say [5Heads Arena Bot]: Voice example saved — "' + phrase + '" marked as ' + result + '.'); return;
+      }
+      if (text === '!testprisonlogs') {
+        const ADMIN_IDS = ['76561199205214362', '76561198337669548'];
+        if (!ADMIN_IDS.includes(userId)) return;
+        await sendPrisonTestLogs();
+        return;
       }
       if (text.startsWith('!history ')) {
         const ADMIN_IDS = ['76561199205214362', '76561198337669548'];
