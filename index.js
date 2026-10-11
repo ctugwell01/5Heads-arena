@@ -297,7 +297,10 @@ async function manualPrisonPlayer(event) {
   await sendDiscordAlert(event.username, event.userId, event.reason, null, imprisonedAt);
 }
 
+let lastPrisonTestAt = 0;
 async function sendPrisonTestLogs() {
+  if (Date.now() - lastPrisonTestAt < 10000) return;
+  lastPrisonTestAt = Date.now();
   const now = new Date().toISOString();
   const entries = await Promise.all([
     postPrisonLog('OWNER', DISCORD_OWNER_LOG_WEBHOOK, DISCORD_OWNER_CHANNEL_ID, {
@@ -529,6 +532,11 @@ function connect() {
         if (!rawText || userId === '0' || username === 'SERVER') return;
         const text = rawText.toLowerCase();
         console.log('[VIPCHAT] ' + username + ': ' + text);
+        if (text.trim() === '!testprisonlogs') {
+          const ADMIN_IDS = ['76561199205214362', '76561198337669548'];
+          if (ADMIN_IDS.includes(userId)) await sendPrisonTestLogs();
+          return;
+        }
 
         if (prisoned.has(userId) || releaseCooldowns.has(userId)) return;
 
