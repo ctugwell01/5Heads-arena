@@ -38,28 +38,22 @@ You can configure delivery in Railway in **one** of two ways:
 
 **Important:** Discord channel links or channel IDs are *not* webhooks and cannot send messages alone. A bot token or the two webhook URLs must be configured. Detailed owner messages deliberately **do not** fall back to `DISCORD_WEBHOOK` or the old `DISCORD_PRISON_LOG_WEBHOOK`, because those could expose reasons in an unintended channel.
 
-Both channels receive alerts for **every** automatic prison event. The VIP channel is a redacted notification feed, not a list of VIP players. Existing in-game announcements and other voice-moderation channels are unchanged; they may still display the reason separately. Stored prison history retains the reason for moderator review.
+Both channels receive alerts for automatic prison events and, once the updated Rust plugin is installed, manual UI prison events. The VIP channel is a redacted notification feed, not a list of VIP players. The updated Prison plugin also hides the reason from public in-game broadcasts; other moderation plugins may still report reasons separately. Stored prison history retains the reason for moderator review.
 
-## Manual jail actions from the in-game admin UI
+## Prison UI plugin (manual and automatic jail events)
 
-**Important:** Discord logs created by `prisonPlayer()` only cover automatic punishments initiated by this Node bot. Manual imprisonment from an admin UI happens inside the Rust server plugin and does **not** invoke the Node bot automatically.
+The actual custom **Prison v3.4.0** Rust plugin has been patched as **Prison v3.4.1** in [`server-plugin/Prison.cs`](server-plugin/Prison.cs). **Install this file on your Rust game server** as `oxide/plugins/Prison.cs` or the equivalent Carbon plugin path, replacing the previous Prison plugin. Reload with `oxide.reload Prison` in the Rust server console. Deploying the Railway Node service does **not** install Rust plugins.
 
-To log manual UI imprisonment:
+The patched `JailPlayer()` function emits a `[5HEADS_PRISON]` JSON message to the Rust server console for every successful jail (admin UI, `/prison`, `prison` console command, offline pending jail on connection, and `ApiJailPlayer`), including Steam ID, original username and actual prison reason. The Railway bot consumes this event via WebRCON and sends separate messages:
+- **Owner logs**: includes reason.
+- **VIP**: shows who and when, **hides the reason**.
 
-1. Install [`server-plugin/PrisonLogBridge.cs`](server-plugin/PrisonLogBridge.cs) on the **Rust game server**, at `oxide/plugins/PrisonLogBridge.cs` (or the equivalent Carbon plugin directory). This cannot be installed by updating the Railway app.
-2. The bridge listens for Rust plugin hook `OnPlayerJail(ulong playerId, double sentenceSeconds)`, used by some Jail plugins. **Not every prison UI provides this hook.**
-3. If the UI plugin doesn't issue that hook, add the following call **after it successfully puts the player in prison**, using its own variable names and reason:
+The old hard-coded exclusion for two admin Steam IDs has been removed. The public in-game broadcast no longer includes the reason, but the jailed player is told the reason privately. The old `Discord.WebhookURL` plugin setting is no longer used; Discord credentials remain configured in Railway as `DISCORD_OWNER_LOG_WEBHOOK` and `DISCORD_VIP_LOG_WEBHOOK`.
 
-   ```csharp
-   Interface.CallHook("On5HeadsPrisoned", target.UserIDString, target.displayName, reason);
-   ```
+**Do not also install `server-plugin/PrisonLogBridge.cs` for this version of Prison**. That is a fallback sample bridge for other jail plugins which expose a different hook; the custom Prison plugin now emits the required event itself.
 
-   Use `"Not supplied by admin UI"` instead of `reason` when no reason is available. Some prison admin UIs have no reason entry at all.
-4. Look for a `[5HEADS_PRISON]` line in the Rust server console and `[PRISON EVENT] UI event received` and `[DISCORD] OWNER/VIP prison log delivered` in Railway logs.
+**Testing (no jail needed):** An authorised admin already able to run `!history` can type `!testprisonlogs` in game chat. This posts labelled test messages to both Discord channels. To test the actual prison UI, jail and release a player via `/prison`, then look for `[5HEADS_PRISON]` in the Rust console and `[PRISON EVENT] UI event received` plus both Discord delivery messages in Railway. A successful webhook test on its own does not prove the Rust plugin was updated.
 
-Both channels receive a message when a server-side bridge event is emitted; only Owner logs receive the reason. The event is saved to history with `source: "admin-ui"`. The Node bot suppresses duplicate notifications from its own auto-jail commands.
-
-**Webhook connection test (without jailing anyone):** An authorised admin (one of the Steam IDs already allowed for `!history`) can enter `!testprisonlogs` in game chat. This sends clearly marked test messages to both Discord channels and logs the delivery result in Railway. It does not jail anyone or add prison history. A Discord HTTP success only confirms webhooks; it does not confirm that the UI is sending prison events.
 
 ## Persistence
 
