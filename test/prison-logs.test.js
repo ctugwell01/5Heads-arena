@@ -31,3 +31,16 @@ test('Player names are sanitized and empty offence counts stay accurate', functi
   assert.equal(player.value, 'Name Injected');
   assert.equal(offence.value, '#0');
 });
+
+test('Both Discord feeds show the actual sentence duration', function() {
+  const embeds = buildPrisonEmbeds('Tester', '76561199205214362', 'Spamming', 1, '2026-10-14T12:00:00Z', 1200);
+  assert.equal(embeds.vip.fields.find(field => field.name === 'Sentence').value, '20 minutes');
+  assert.equal(embeds.owner.fields.find(field => field.name === 'Sentence').value, '20 minutes');
+  assert.equal(JSON.stringify(embeds.vip).includes('Spamming'), false);
+});
+
+test('Permanent punishments show the sentence without leaking a reason', function() {
+  const embeds = buildPrisonEmbeds('Player', '76561199205214362', 'SomeSecretOffence', null, undefined, 0);
+  assert.equal(embeds.vip.fields.find(field => field.name === 'Sentence').value, 'Permanent');
+  assert.equal(JSON.stringify(embeds.vip).includes('SomeSecretOffence'), false);
+});
