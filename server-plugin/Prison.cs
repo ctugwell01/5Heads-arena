@@ -9,7 +9,7 @@ using System.Linq;
 
 namespace Oxide.Plugins
 {
-    [Info("Prison", "5HeadNN", "3.4.2")]
+    [Info("Prison", "5HeadNN", "3.4.3")]
     [Description("Prison system with detailed in-game admin UI — /prison to open")]
     public class Prison : RustPlugin
     {
@@ -332,7 +332,7 @@ namespace Oxide.Plugins
             }
             if (count == 0) { admin.ChatMessage("Nobody to send - no jailed players online or all already at yard."); return; }
             admin.ChatMessage($"<color=#00ff00>Yard time started for {count} prisoner(s).</color>");
-            Server.Broadcast($"<color=#ff5555>[PRISON]</color> Yard time for {count} prisoner(s), enjoy it while it lasts.");
+            Server.Broadcast($"<color=#ff5555>[5Heads Arena]</color> Yard time for {count} prisoner(s), enjoy it while it lasts.");
         }
 
         private void StartYardTime(BasePlayer player)
@@ -451,9 +451,7 @@ namespace Oxide.Plugins
                     long start = jailStartTimes.TryGetValue(uid, out long st) ? st : UnixNow();
                     if (UnixNow() - start >= sentenceSecs)
                     {
-                        string relName = GetDisplayName(uid);
-                        UnjailPlayer(player);
-                        Server.Broadcast($"<color=#ff5555>[PRISON]</color> {relName} served their time and was released.");
+                        UnjailPlayer(player, true);
                         continue;
                     }
                 }
@@ -498,7 +496,7 @@ namespace Oxide.Plugins
         {
             string name = GetDisplayName(escapee.userID);
             AddEvent($"{name} escape attempt!", "0.70 0.30 0.06 1");
-            Server.Broadcast($"<color=#ff5555>[PRISON]</color> <color=#ffffff>{name}</color> is making a break for it!");
+            Server.Broadcast($"<color=#ff5555>[5Heads Arena]</color> <color=#ffffff>{name}</color> is making a break for it!");
             timer.Repeat(0.35f, 6, () =>
             {
                 if (!escapeAlarmActive.Contains(escapee.userID)) return;
@@ -630,8 +628,8 @@ namespace Oxide.Plugins
         [ChatCommand("timeleft")]
         private void TimeLeftCommand(BasePlayer player, string command, string[] args)
         {
-            if (!IsJailed(player)) { player.ChatMessage("<color=#ffaa00>[PRISON]</color> You're not jailed."); return; }
-            player.ChatMessage($"<color=#ffaa00>[PRISON]</color>{DescribeRemainingForPlayer(player.userID)}");
+            if (!IsJailed(player)) { player.ChatMessage("<color=#ffaa00>[5Heads Arena]</color> You're not jailed."); return; }
+            player.ChatMessage($"<color=#ffaa00>[5Heads Arena]</color>{DescribeRemainingForPlayer(player.userID)}");
         }
 
         [ChatCommand("jailpending")]
@@ -724,11 +722,11 @@ namespace Oxide.Plugins
             string cleanReason = CleanAnnouncementText(reason);
             long sentence = jailDurations[player.userID];
             string lengthText = sentence <= 0 ? "permanently" : "for " + FormatAnnouncementDuration(sentence);
-            Server.Broadcast($"<color=#16c36a>[Combat Prison]</color> <color=#ffcd36>{cleanName}({player.userID})</color> locked up {lengthText} - <color=#ffcd36>Reason: {cleanReason}</color>");
+            Server.Broadcast($"<color=#16c36a>[5Heads Arena]</color> <color=#ffcd36>{cleanName}({player.userID})</color> locked up {lengthText} - <color=#ffcd36>Reason: {cleanReason}</color>");
             ReportPrisonToArenaBot(player, displayName, reason);
         }
 
-        private void UnjailPlayer(BasePlayer player)
+        private void UnjailPlayer(BasePlayer player, bool sentenceCompleted = false)
         {
             if (!jailedPlayers.TryGetValue(player.userID, out Vector3 releasePos))
             { player.ChatMessage("Player is not jailed."); return; }
@@ -749,6 +747,9 @@ namespace Oxide.Plugins
             player.SendNetworkUpdateImmediate();
             RestoreName(player); RestoreInventory(player); UnmutePlayer(player);
             AddEvent($"{name} released", "0.22 0.55 0.14 1");
+            // Match jail notices: one branded public release announcement.
+            string releaseDescription = sentenceCompleted ? "sentence completed" : "released by admin";
+            Server.Broadcast($"<color=#16c36a>[5Heads Arena]</color> <color=#ffcd36>{CleanAnnouncementText(name)}({player.userID})</color> has been released - {releaseDescription}");
             // only send to lobby if they were actually mid-gamemode
             bool wasInGamemode = RemoveFromGamemodes(player);
             Vector3 destination = releasePos;
@@ -778,7 +779,7 @@ namespace Oxide.Plugins
                     timer.Once(1f, () =>
                     {
                         if (player == null || !player.IsConnected || !IsJailed(player)) return;
-                        UnjailPlayer(player);
+                        UnjailPlayer(player, true);
                         player.ChatMessage("<color=#00ff00>Your sentence was served while you were away. You're free.</color>");
                     });
                     return;
@@ -906,7 +907,7 @@ namespace Oxide.Plugins
                 if (p == null || !p.IsConnected) continue;
                 StartYardTime(p); count++;
             }
-            if (count > 0) Server.Broadcast($"<color=#ff5555>[PRISON]</color> Yard time granted to {count} prisoner(s).");
+            if (count > 0) Server.Broadcast($"<color=#ff5555>[5Heads Arena]</color> Yard time granted to {count} prisoner(s).");
             OpenPrisonUI(admin, 0, 0);
         }
 
@@ -1980,7 +1981,7 @@ namespace Oxide.Plugins
             EffectNetwork.Send(effect, player.net.connection);
         }
 
-        // Public Rust chat format: matches Combat Prison's coloured single-event notice.
+        // Public Rust chat format: 5Heads Arena branded single-event notice.
         // Strip player-supplied rich-text tags and newlines from public announcements.
         private string CleanAnnouncementText(string value)
         {
