@@ -9,7 +9,7 @@ using System.Linq;
 
 namespace Oxide.Plugins
 {
-    [Info("Prison", "5HeadNN", "3.4.1")]
+    [Info("Prison", "5HeadNN", "3.4.2")]
     [Description("Prison system with detailed in-game admin UI — /prison to open")]
     public class Prison : RustPlugin
     {
@@ -569,9 +569,25 @@ namespace Oxide.Plugins
         private void PrisonConsoleCommand(ConsoleSystem.Arg arg)
         {
             if (arg.Args == null || arg.Args.Length < 1) return;
-            string reason = arg.Args.Length >= 2 ? string.Join(" ", arg.Args.Skip(1).Select(a => (string)a)) : "Rule Violation";
+            // Internal RCON moderation may supply an explicit temporary sentence.
+            // The optional flag is removed from the reason visible to players.
+            var reasonParts = arg.Args.Skip(1).Select(a => (string)a).ToList();
+            long? overrideSeconds = null;
+            if (reasonParts.Count > 0)
+            {
+                string lastArg = reasonParts[reasonParts.Count - 1];
+                const string durationFlag = "--duration-minutes=";
+                if (lastArg.StartsWith(durationFlag, System.StringComparison.OrdinalIgnoreCase)
+                    && long.TryParse(lastArg.Substring(durationFlag.Length), out long mins)
+                    && mins >= 0 && mins <= 525600)
+                {
+                    overrideSeconds = mins * 60L;
+                    reasonParts.RemoveAt(reasonParts.Count - 1);
+                }
+            }
+            string reason = reasonParts.Count > 0 ? string.Join(" ", reasonParts) : "Rule Violation";
             BasePlayer target = FindPlayer((string)arg.Args[0]);
-            if (target != null) { JailPlayer(target, reason); return; }
+            if (target != null) { JailPlayer(target, reason, overrideSeconds); return; }
             if (ulong.TryParse((string)arg.Args[0], out ulong offlineId))
             {
                 if (jailedPlayers.ContainsKey(offlineId)) return;
@@ -655,7 +671,7 @@ namespace Oxide.Plugins
 
         // jail / unjail logic
 
-        private void JailPlayer(BasePlayer player, string reason = "Unlucky Shitter")
+        private void JailPlayer(BasePlayer player, string reason = "Unlucky Shitter", long? overrideSeconds = null)
         {
             if (player == null) return;
             if (!originalNames.ContainsKey(player.userID))
@@ -669,7 +685,7 @@ namespace Oxide.Plugins
             playerCells[player.userID]    = PickCell();
             jailReasons[player.userID]    = reason;
             jailStartTimes[player.userID] = UnixNow();
-            jailDurations[player.userID]  = GetSentenceSeconds(player.userID, reason);
+            jailDurations[player.userID]  = overrideSeconds ?? GetSentenceSeconds(player.userID, reason);
             SaveData(); SaveReasonsData(); SaveTimesData(); SaveDurationsData();
             StartPositionTimer();
             // native "mute" silently no-ops if it fires before the connection is fully
@@ -702,10 +718,13 @@ namespace Oxide.Plugins
                 StartHeliSound(player);
                 StartDeathSound(player);
             }
-            string cellInfo = cellLocations.Count > 0 ? $" (Cell {cellLocations.IndexOf(playerCells[player.userID]) + 1}/{cellLocations.Count})" : "";
-            // Keep the public in-game announcement reason-free; the prisoner still
-            // receives their reason privately above, and owners receive it on Discord.
-            Server.Broadcast($"<color=#ff5555>[PRISON]</color> {displayName} got jailed.{cellInfo}");
+            // One formatted announcement for all successful jails (UI, command and bot).
+            // The player's original name is used because the jail system renames them.
+            string cleanName = CleanAnnouncementText(displayName);
+            string cleanReason = CleanAnnouncementText(reason);
+            long sentence = jailDurations[player.userID];
+            string lengthText = sentence <= 0 ? "permanently" : "for " + FormatAnnouncementDuration(sentence);
+            Server.Broadcast($"<color=#16c36a>[Combat Prison]</color> <color=#ffcd36>{cleanName}({player.userID})</color> locked up {lengthText} - <color=#ffcd36>Reason: {cleanReason}</color>");
             ReportPrisonToArenaBot(player, displayName, reason);
         }
 
@@ -1961,6 +1980,36 @@ namespace Oxide.Plugins
             EffectNetwork.Send(effect, player.net.connection);
         }
 
+        // Public Rust chat format: matches Combat Prison's coloured single-event notice.
+        // Strip player-supplied rich-text tags and newlines from public announcements.
+        private string CleanAnnouncementText(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "Unknown";
+            string cleaned = System.Text.RegularExpressions.Regex.Replace(value, "<[^>]*>", "");
+            cleaned = cleaned.Replace("\r", " ").Replace("\n", " ").Trim();
+            return cleaned.Length > 180 ? cleaned.Substring(0, 180) : cleaned;
+        }
+
+        private string FormatAnnouncementDuration(long seconds)
+        {
+            if (seconds >= 86400 && seconds % 86400 == 0)
+            {
+                long days = seconds / 86400;
+                return days + (days == 1 ? " day" : " days");
+            }
+            if (seconds >= 3600 && seconds % 3600 == 0)
+            {
+                long hours = seconds / 3600;
+                return hours + (hours == 1 ? " hour" : " hours");
+            }
+            if (seconds >= 60)
+            {
+                long minutes = (seconds + 59) / 60;
+                return minutes + (minutes == 1 ? " minute" : " minutes");
+            }
+            return seconds + (seconds == 1 ? " second" : " seconds");
+        }
+
         // prison event delivery
         // This plugin is the source of truth for UI, chat, console and API jails.
         // Railway's Arena bot already holds separate owner/VIP Discord webhooks.
@@ -1975,7 +2024,8 @@ namespace Oxide.Plugins
                 {
                     steamId = player.UserIDString,
                     username = originalName,
-                    reason = string.IsNullOrWhiteSpace(reason) ? "Not supplied by admin UI" : reason
+                    reason = string.IsNullOrWhiteSpace(reason) ? "Not supplied by admin UI" : reason,
+                    durationSeconds = jailDurations.TryGetValue(player.userID, out long seconds) ? seconds : 0L
                 });
                 Puts("[5HEADS_PRISON] " + json);
             }
