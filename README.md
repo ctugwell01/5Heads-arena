@@ -42,7 +42,7 @@ Both channels receive alerts for automatic prison events and, once the updated R
 
 ## Prison UI plugin (manual and automatic jail events)
 
-The actual custom **Prison v3.4.0** Rust plugin has been patched as **Prison v3.4.4** in [`server-plugin/Prison.cs`](server-plugin/Prison.cs). **Install this file on your Rust game server** as `oxide/plugins/Prison.cs` or the equivalent Carbon plugin path, replacing the previous Prison plugin. Reload with `oxide.reload Prison` in the Rust server console. Deploying the Railway Node service does **not** install Rust plugins.
+The actual custom **Prison v3.4.0** Rust plugin has been patched as **Prison v3.4.5** in [`server-plugin/Prison.cs`](server-plugin/Prison.cs). **Install this file on your Rust game server** as `oxide/plugins/Prison.cs` or the equivalent Carbon plugin path, replacing the previous Prison plugin. Reload with `oxide.reload Prison` in the Rust server console. Deploying the Railway Node service does **not** install Rust plugins.
 
 The patched `JailPlayer()` function broadcasts a screenshot-style prison message and emits a `[5HEADS_PRISON]` JSON message to the Rust server console for every successful jail (admin UI, `/prison`, `prison` console command, offline pending jail on connection, and `ApiJailPlayer`), including Steam ID, original username, actual prison reason and sentence duration. The Railway bot consumes this event via WebRCON and sends separate messages:
 - **Owner logs**: includes reason.
@@ -64,6 +64,22 @@ Timed and permanent sentences are formatted from the actual server plugin senten
 
 **Testing (no jail needed):** An authorised admin already able to run `!history` can type `!testprisonlogs` in game chat. This posts labelled test messages to both Discord channels. To test the actual prison UI, jail and release a player via `/prison`, then look for `[5HEADS_PRISON]` in the Rust console and `[PRISON EVENT] UI event received` plus both Discord delivery messages in Railway. A successful webhook test on its own does not prove the Rust plugin was updated.
 
+
+## Prison cell door decay protection (v3.4.5)
+
+**What went wrong:** The original anti-decay hook used `Prison.Radius` (6 metres by default), which is also the player's movement boundary. A prison door or building block farther than 6m from the main prison position **and every saved cell location** could still decay. Separately, the Rust-side `Prison.cs` must actually be loaded; a successful Railway deployment does not guarantee the game-server plugin is active.
+
+**Fix:** The updated plugin now protects **all door types and building block grades** from *decay damage only*, within an independent **40-metre** `Prison.DecayProtectionRadius` of the prison location or **any saved cell**. It does not alter `Prison.Radius` (player movement), prison timers, PvP/explosion damage, the VIP privacy rule, or existing data. If your prison is larger, set the radius just large enough to encompass its structures so nearby unrelated buildings aren't protected.
+
+**Rust server installation & diagnosis:**
+
+1. Place [`server-plugin/Prison.cs`](server-plugin/Prison.cs) in `oxide/plugins/Prison.cs` (or the equivalent Carbon plugin folder) **on the Rust server** and run `oxide.reload Prison`. Confirm the server console reports the plugin loaded without compiler errors and logs `[5Heads Arena] Prison anti-decay radius 40.0m ...`.
+2. In the actual prison, stand next to a cell door and enter **`/prisondecay`** as an admin with `prison.use`. It reports whether your character is **INSIDE** the protected area, the distance to the nearest prison/cell position, the configured radius, and number of saved cells. This checks your position as an approximation of the door's position.
+3. If **OUTSIDE**, increase `Prison.DecayProtectionRadius` in `oxide/config/Prison.json`, then reload the plugin, or configure additional jail cell positions using `/addcell`. Do not change `Prison.Radius` just to address decay: that would also affect prison containment.
+4. **Emergency upkeep:** Keep a Tool Cupboard authorised and stocked with sufficient building upkeep while testing. Rust can still decay structures whenever the plugin is unloaded, fails to compile, is outside the protected area, or another plugin interferes.
+5. Replace/rebuild already destroyed cell doors, as decay protection prevents future damage but does not restore missing entities.
+
+The protection only applies to doors and building blocks, not every deployable object. If doors inside the protected radius still decay with the plugin active, check the Rust game-server console for compiler errors and other decay plugins; Railway application logs alone cannot diagnose the Rust plugin.
 
 ## Racism prison escalation (v3.4.4)
 
