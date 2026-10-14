@@ -9,7 +9,7 @@ using System.Linq;
 
 namespace Oxide.Plugins
 {
-    [Info("Prison", "5HeadNN", "3.4.4")]
+    [Info("Prison", "5HeadNN", "3.4.5")]
     [Description("Prison system with detailed in-game admin UI — /prison to open")]
     public class Prison : RustPlugin
     {
@@ -55,6 +55,8 @@ namespace Oxide.Plugins
         private Vector3 yardLocation;
         private Vector3 prisonLocation;
         private float   prisonRadius;
+        // Separate protection footprint: jail movement radius is intentionally smaller.
+        private float   decayProtectionRadius;
 
         private const string GrenadeEffect = "assets/prefabs/weapons/f1 grenade/effects/f1grenade_explosion.prefab";
         private const string DeathEffect   = "assets/bundled/prefabs/fx/headshot.prefab";
@@ -403,29 +405,55 @@ namespace Oxide.Plugins
             player.ChatMessage("<color=#ff0000>The door is locked. Sit down.</color>");
         }
 
-        // anti-decay: protect prison stone/metal/HQM blocks and doors only
+        // Anti-decay uses its own larger, configurable radius. The old code
+        // used the small 6m movement boundary, missing doors at the edges
+        // of a larger prison. Protect doors and building blocks of ALL grades.
+        private bool IsInsideDecayProtection(Vector3 position)
+        {
+            if (decayProtectionRadius <= 0f) return false;
+            float radiusSqr = decayProtectionRadius * decayProtectionRadius;
+            if ((position - prisonLocation).sqrMagnitude <= radiusSqr) return true;
+            foreach (Vector3 cell in cellLocations)
+            {
+                if ((position - cell).sqrMagnitude <= radiusSqr) return true;
+            }
+            return false;
+        }
+
+        private float DistanceToDecayAnchor(Vector3 position)
+        {
+            float minDistanceSquared = (position - prisonLocation).sqrMagnitude;
+            foreach (Vector3 cell in cellLocations)
+            {
+                float distanceSquared = (position - cell).sqrMagnitude;
+                if (distanceSquared < minDistanceSquared) minDistanceSquared = distanceSquared;
+            }
+            return Mathf.Sqrt(minDistanceSquared);
+        }
+
         private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
             if (entity == null || info?.damageTypes == null) return null;
             if (info.damageTypes.Get(Rust.DamageType.Decay) <= 0f) return null;
+            if (!(entity is Door) && !(entity is BuildingBlock)) return null;
+            if (!IsInsideDecayProtection(entity.transform.position)) return null;
 
-            bool protect = entity is Door;
-            if (entity is BuildingBlock block)
-            {
-                protect = block.grade == BuildingGrade.Enum.Stone
-                    || block.grade == BuildingGrade.Enum.Metal
-                    || block.grade == BuildingGrade.Enum.TopTier;
-            }
-            if (!protect) return null;
-
-            float radiusSqr = prisonRadius * prisonRadius;
-            Vector3 pos = entity.transform.position;
-            bool inPrison = (pos - prisonLocation).sqrMagnitude <= radiusSqr
-                || cellLocations.Any(cell => (pos - cell).sqrMagnitude <= radiusSqr);
-            if (!inPrison) return null;
-
+            // Remove only decay damage: player attacks and raids still work.
             info.damageTypes.Scale(Rust.DamageType.Decay, 0f);
             return null;
+        }
+
+        // Stand by a prison door and run /prisondecay to verify its coverage.
+        [ChatCommand("prisondecay")]
+        private void PrisonDecayStatus(BasePlayer admin, string command, string[] args)
+        {
+            if (admin == null || !HasPermission(admin, PermUse)) return;
+            float distance = DistanceToDecayAnchor(admin.transform.position);
+            bool covered = IsInsideDecayProtection(admin.transform.position);
+            string status = covered ? "<color=#33dd66>INSIDE</color>" : "<color=#ff5555>OUTSIDE</color>";
+            admin.ChatMessage($"<color=#33dd66>[5Heads Arena]</color> Anti-decay {status} at your position. Nearest prison/cell anchor: {distance:F1}m; protection radius: {decayProtectionRadius:F1}m; saved cells: {cellLocations.Count}.");
+            if (!covered)
+                admin.ChatMessage("<color=#ffaa00>[5Heads Arena]</color> Increase Prison.DecayProtectionRadius in oxide/config/Prison.json and reload Prison, or add a cell anchor with /addcell near this part of the prison.");
         }
 
         // position checks / escape
@@ -1747,7 +1775,7 @@ namespace Oxide.Plugins
 
         protected override void LoadDefaultConfig()
         {
-            Config["Prison"] = new Dictionary<string, object> { ["X"] = 0f, ["Y"] = 20f, ["Z"] = 0f, ["Radius"] = 6f };
+            Config["Prison"] = new Dictionary<string, object> { ["X"] = 0f, ["Y"] = 20f, ["Z"] = 0f, ["Radius"] = 6f, ["DecayProtectionRadius"] = 40f };
             Config["Yard"]   = new Dictionary<string, object> { ["X"] = 0f, ["Y"] = 20f, ["Z"] = 0f };
             // sentence length per jail reason, in MINUTES. 0 = indefinite (only /unjail lets them out).
             // "Default" is used for any reason that doesn't match one of these exactly (e.g. free-typed
@@ -1782,6 +1810,13 @@ namespace Oxide.Plugins
                 ["Default"]      = 0f,
             };
             bool changed = false;
+            // Existing configs from older versions did not have a separate
+            // anti-decay radius. Supply it without altering movement Radius.
+            if (Config["Prison", "DecayProtectionRadius"] == null)
+            {
+                Config["Prison", "DecayProtectionRadius"] = 40f;
+                changed = true;
+            }
             foreach (var kvp in defaults)
             {
                 if (Config["Sentences", kvp.Key] == null) { Config["Sentences", kvp.Key] = kvp.Value; changed = true; }
@@ -1843,7 +1878,9 @@ namespace Oxide.Plugins
             EnsureSentenceDefaults();
             prisonLocation    = new Vector3(GetConfigFloat("Prison", "X"), GetConfigFloat("Prison", "Y"), GetConfigFloat("Prison", "Z"));
             prisonRadius      = GetConfigFloat("Prison", "Radius");
+            decayProtectionRadius = Mathf.Max(0f, GetConfigFloat("Prison", "DecayProtectionRadius"));
             yardLocation      = new Vector3(GetConfigFloat("Yard", "X"), GetConfigFloat("Yard", "Y"), GetConfigFloat("Yard", "Z"));
+            Puts($"[5Heads Arena] Prison anti-decay radius {decayProtectionRadius:F1}m (movement radius {prisonRadius:F1}m), saved cell anchors: {cellLocations.Count}. Use /prisondecay beside a door to test.");
         }
 
         private float GetConfigFloat(string category, string key) => Config[category, key] == null ? 0f : System.Convert.ToSingle(Config[category, key]);
