@@ -18,3 +18,13 @@ test('ignores player chat and spoofed events', function() {
   assert.equal(parseManualPrisonEvent('[5HEADS_PRISON] {"steamId":"not-a-steam-id","username":"X"}'),null);
   assert.equal(parseManualPrisonEvent('[5HEADS_PRISON] no json'),null);
 });
+
+test('parses the actual Rust Prison plugin event with its duration', function() {
+  const event = parseManualPrisonEvent('[Prison] [5HEADS_PRISON] {"steamId":"76561199205214362","username":"Admin","reason":"Toxicity","durationSeconds":1200}');
+  assert.deepEqual(event, { userId:'76561199205214362', username:'Admin', reason:'Toxicity', durationSeconds:1200 });
+});
+
+test('ignores invalid durations but still logs the prisoner', function() {
+  const event = parseManualPrisonEvent('[5HEADS_PRISON] {"steamId":"76561199205214362","username":"Admin","reason":"Toxicity","durationSeconds":-30}');
+  assert.equal(Object.hasOwn(event, 'durationSeconds'), false);
+});
