@@ -271,8 +271,8 @@ async function postPrisonLog(label, webhook, channelId, embed) {
   }
 }
 
-async function sendDiscordAlert(username, userId, reason, offence, time) {
-  const embeds = buildPrisonEmbeds(username, userId, reason, offence, time);
+async function sendDiscordAlert(username, userId, reason, offence, time, durationSeconds) {
+  const embeds = buildPrisonEmbeds(username, userId, reason, offence, time, durationSeconds);
   // Send separate payloads: only the owner channel ever receives the reason.
   await Promise.all([
     postPrisonLog('OWNER', DISCORD_OWNER_LOG_WEBHOOK, DISCORD_OWNER_CHANNEL_ID, embeds.owner),
@@ -294,7 +294,7 @@ async function manualPrisonPlayer(event) {
   });
   savePrisonHistory();
   console.log('[PRISON EVENT] UI event received for ' + event.userId);
-  await sendDiscordAlert(event.username, event.userId, event.reason, null, imprisonedAt);
+  await sendDiscordAlert(event.username, event.userId, event.reason, null, imprisonedAt, event.durationSeconds);
 }
 
 let lastPrisonTestAt = 0;
@@ -332,9 +332,8 @@ async function prisonPlayer(userId, username, reason) {
     spamOffences[userId] = (spamOffences[userId] || 0) + 1;
     saveOffences();
     if (minutes !== null) {
-      await sendDiscordAlert(username, userId, 'Spamming', spamOffences[userId], imprisonedAt);
-      sendRcon('prison ' + userId + ' Spamming');
-      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned for spamming. You have ' + minutes + ' minute(s) remaining.');
+      await sendDiscordAlert(username, userId, 'Spamming', spamOffences[userId], imprisonedAt, minutes === null ? 0 : minutes * 60);
+      sendRcon('prison ' + userId + ' Spamming --duration-minutes=' + minutes);
       setTimeout(function() {
         sendRcon('unjail ' + userId);
         prisoned.delete(userId);
@@ -342,18 +341,16 @@ async function prisonPlayer(userId, username, reason) {
         setTimeout(function() { releaseCooldowns.delete(userId); }, 60000);
       }, minutes * 60 * 1000);
     } else {
-      await sendDiscordAlert(username, userId, 'Spamming', spamOffences[userId], imprisonedAt);
+      await sendDiscordAlert(username, userId, 'Spamming', spamOffences[userId], imprisonedAt, minutes === null ? 0 : minutes * 60);
       sendRcon('prison ' + userId + ' Spamming');
-      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been permanently prisoned for repeated spamming.');
     }
   } else if (reason === 'HateSpeech') {
     const minutes = getSlurMinutes(userId);
     spamOffences[userId + '_slur'] = (spamOffences[userId + '_slur'] || 0) + 1;
     saveOffences();
     if (minutes !== null) {
-      await sendDiscordAlert(username, userId, 'HateSpeech', spamOffences[userId + '_slur'], imprisonedAt);
-      sendRcon('prison ' + userId + ' HateSpeech');
-      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned for hate speech. You have ' + minutes + ' minute(s) remaining.');
+      await sendDiscordAlert(username, userId, 'HateSpeech', spamOffences[userId + '_slur'], imprisonedAt, minutes * 60);
+      sendRcon('prison ' + userId + ' HateSpeech --duration-minutes=' + minutes);
       setTimeout(function() {
         sendRcon('unjail ' + userId);
         prisoned.delete(userId);
@@ -361,18 +358,12 @@ async function prisonPlayer(userId, username, reason) {
         setTimeout(function() { releaseCooldowns.delete(userId); }, 60000);
       }, minutes * 60 * 1000);
     } else {
-      await sendDiscordAlert(username, userId, 'HateSpeech', null, imprisonedAt);
+      await sendDiscordAlert(username, userId, 'HateSpeech', null, imprisonedAt, 0);
       sendRcon('prison ' + userId + ' HateSpeech');
-      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been permanently prisoned for repeated hate speech.');
     }
   } else {
-    await sendDiscordAlert(username, userId, reason, null, imprisonedAt);
+    await sendDiscordAlert(username, userId, reason, null, imprisonedAt, 0);
     sendRcon('prison ' + userId + ' ' + reason);
-    if (reason === 'Threats') {
-      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned for making threats.');
-    } else {
-      sendRcon('say [5Heads Arena Bot]: ' + username + ' has been automatically prisoned.');
-    }
     setTimeout(function() { prisoned.delete(userId); }, 30000);
   }
 }
