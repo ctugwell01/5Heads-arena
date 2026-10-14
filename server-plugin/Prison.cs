@@ -9,7 +9,7 @@ using System.Linq;
 
 namespace Oxide.Plugins
 {
-    [Info("Prison", "5HeadNN", "3.4.3")]
+    [Info("Prison", "5HeadNN", "3.4.4")]
     [Description("Prison system with detailed in-game admin UI — /prison to open")]
     public class Prison : RustPlugin
     {
@@ -1754,7 +1754,7 @@ namespace Oxide.Plugins
             // reasons from /prison <player> <reason>).
             Config["Sentences", "Toxicity"]     = 20f;
             Config["Sentences", "Exploiting"]   = 180f;
-            Config["Sentences", "Racism"]       = 120f;
+            Config["Sentences", "Racism"]       = 5f;
             Config["Sentences", "Admin Jailed"] = 0f;
             Config["Sentences", "5Head Abuse"]  = 0f;
             Config["Sentences", "Default"]      = 0f;
@@ -1763,7 +1763,7 @@ namespace Oxide.Plugins
             // index 1 = 2nd time, ...). Once past the end of the list, the LAST stage repeats —
             // so a last stage of 0 means "permanent from then on". A reason with no ladder here
             // just uses its flat Sentences value every time, no escalation.
-            Config["Escalation", "Racism"]     = new List<object> { 5f, 20f, 240f, 0f };       // 5m -> 20m -> 4h -> permanent from the 4th
+            Config["Escalation", "Racism"]     = new List<object> { 5f, 10f, 15f, 30f, 60f, 120f }; // progressive chances; max 2h
             Config["Escalation", "Toxicity"]   = new List<object> { 5f, 15f, 45f, 120f, 0f };  // 5m -> 15m -> 45m -> 2h -> permanent from the 5th
             Config["Escalation", "Exploiting"] = new List<object> { 30f, 120f, 360f, 0f };     // 30m -> 2h -> 6h -> permanent from the 4th
         }
@@ -1776,7 +1776,7 @@ namespace Oxide.Plugins
             {
                 ["Toxicity"]     = 20f,
                 ["Exploiting"]   = 180f,
-                ["Racism"]       = 120f,
+                ["Racism"]       = 5f,
                 ["Admin Jailed"] = 0f,
                 ["5Head Abuse"]  = 0f,
                 ["Default"]      = 0f,
@@ -1786,9 +1786,23 @@ namespace Oxide.Plugins
             {
                 if (Config["Sentences", kvp.Key] == null) { Config["Sentences", kvp.Key] = kvp.Value; changed = true; }
             }
-            if (Config["Escalation", "Racism"] == null)
+            // Migrate just the original shipped racism ladder. Preserve any
+            // administrator-customised ladder so server settings are respected.
+            object currentRacismLadder = Config["Escalation", "Racism"];
+            if (currentRacismLadder == null || IsLegacyRacismLadder(currentRacismLadder))
             {
-                Config["Escalation", "Racism"] = new List<object> { 5f, 20f, 240f, 0f };
+                Config["Escalation", "Racism"] = new List<object> { 5f, 10f, 15f, 30f, 60f, 120f };
+                changed = true;
+            }
+            // A legacy flat fallback of 120 minutes is likewise shortened.
+            // Custom sentence fallbacks with other values are not changed.
+            object currentRacismSentence = Config["Sentences", "Racism"];
+            if (currentRacismSentence != null &&
+                float.TryParse(currentRacismSentence.ToString(), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float oldRacismMinutes) &&
+                oldRacismMinutes == 120f)
+            {
+                Config["Sentences", "Racism"] = 5f;
                 changed = true;
             }
             if (Config["Escalation", "Toxicity"] == null)
@@ -1802,6 +1816,26 @@ namespace Oxide.Plugins
                 changed = true;
             }
             if (changed) SaveConfig();
+        }
+
+        private bool IsLegacyRacismLadder(object configured)
+        {
+            // Handles both normal .NET lists and Newtonsoft JSON arrays read from
+            // an existing Oxide config without resetting offence counts.
+            if (configured == null || configured is string) return false;
+            if (!(configured is System.Collections.IEnumerable values)) return false;
+            var oldStages = new List<float>();
+            foreach (object raw in values)
+            {
+                if (raw == null ||
+                    !float.TryParse(raw.ToString(), System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out float minutes)) return false;
+                oldStages.Add(minutes);
+                if (oldStages.Count > 4) return false;
+            }
+            return oldStages.Count == 4 &&
+                oldStages[0] == 5f && oldStages[1] == 20f &&
+                oldStages[2] == 240f && oldStages[3] == 0f;
         }
 
         private void LoadConfigValues()
