@@ -42,7 +42,7 @@ Both channels receive alerts for automatic prison events and, once the updated R
 
 ## Prison UI plugin (manual and automatic jail events)
 
-The actual custom **Prison v3.4.0** Rust plugin has been patched as **Prison v3.4.3** in [`server-plugin/Prison.cs`](server-plugin/Prison.cs). **Install this file on your Rust game server** as `oxide/plugins/Prison.cs` or the equivalent Carbon plugin path, replacing the previous Prison plugin. Reload with `oxide.reload Prison` in the Rust server console. Deploying the Railway Node service does **not** install Rust plugins.
+The actual custom **Prison v3.4.0** Rust plugin has been patched as **Prison v3.4.4** in [`server-plugin/Prison.cs`](server-plugin/Prison.cs). **Install this file on your Rust game server** as `oxide/plugins/Prison.cs` or the equivalent Carbon plugin path, replacing the previous Prison plugin. Reload with `oxide.reload Prison` in the Rust server console. Deploying the Railway Node service does **not** install Rust plugins.
 
 The patched `JailPlayer()` function broadcasts a screenshot-style prison message and emits a `[5HEADS_PRISON]` JSON message to the Rust server console for every successful jail (admin UI, `/prison`, `prison` console command, offline pending jail on connection, and `ApiJailPlayer`), including Steam ID, original username, actual prison reason and sentence duration. The Railway bot consumes this event via WebRCON and sends separate messages:
 - **Owner logs**: includes reason.
@@ -64,6 +64,23 @@ Timed and permanent sentences are formatted from the actual server plugin senten
 
 **Testing (no jail needed):** An authorised admin already able to run `!history` can type `!testprisonlogs` in game chat. This posts labelled test messages to both Discord channels. To test the actual prison UI, jail and release a player via `/prison`, then look for `[5HEADS_PRISON]` in the Rust console and `[PRISON EVENT] UI event received` plus both Discord delivery messages in Railway. A successful webhook test on its own does not prove the Rust plugin was updated.
 
+
+## Racism prison escalation (v3.4.4)
+
+Players get escalating **timed** prison sentences for the `Racism` reason; they are automatically released when the timer expires:
+
+| Racism offence | Sentence |
+| --- | --- |
+| 1st | 5 minutes |
+| 2nd | 10 minutes |
+| 3rd | 15 minutes |
+| 4th | 30 minutes |
+| 5th | 1 hour |
+| 6th and any later | 2 hours |
+
+There is no automatic permanent stage for this offence. After the sixth offence the last stage repeats, instead of increasing indefinitely. Offence counts remain in the existing `PrisonOffenseCounts` data file, and each new jail uses the correct stage based on that saved count. The plugin migrates the original default `Escalation.Racism` ladder (`[5, 20, 240, 0]`) in the Rust server's existing config to `[5, 10, 15, 30, 60, 120]` on plugin startup, and migrates the original fallback sentence of 120 minutes to 5 minutes. Custom non-default ladders are preserved. **Do not delete the config or offence-history files.**
+
+The changed ladder applies to **new prison events**; an already-running sentence keeps its previously assigned duration. `Toxicity` and `Exploiting` punishment ladders are unchanged. The Railway bot's automatic `HateSpeech` timer is a separate mechanism and is not changed by this Rust plugin setting.
 
 ## Persistence
 
