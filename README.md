@@ -38,23 +38,25 @@ You can configure delivery in Railway in **one** of two ways:
 
 **Important:** Discord channel links or channel IDs are *not* webhooks and cannot send messages alone. A bot token or the two webhook URLs must be configured. Detailed owner messages deliberately **do not** fall back to `DISCORD_WEBHOOK` or the old `DISCORD_PRISON_LOG_WEBHOOK`, because those could expose reasons in an unintended channel.
 
-Both channels receive alerts for automatic prison events and, once the updated Rust plugin is installed, manual UI prison events. The VIP channel is a redacted notification feed, not a list of VIP players. The updated Prison plugin displays the reason in public Rust chat, matching the requested screenshot, but not in VIP Discord; other moderation plugins may have their own announcements. Stored prison history retains the reason for moderator review.
+Both channels receive alerts for automatic prison events and, once the updated Rust plugin is installed, manual UI prison events. The VIP channel is a redacted notification feed, not a list of VIP players. The updated Prison plugin displays the reason in public Rust chat, but not in VIP Discord. Its releases are also branded **5Heads Arena**. Other independent prison plugins may produce their own notices. Stored prison history retains the reason for moderator review.
 
 ## Prison UI plugin (manual and automatic jail events)
 
-The actual custom **Prison v3.4.0** Rust plugin has been patched as **Prison v3.4.2** in [`server-plugin/Prison.cs`](server-plugin/Prison.cs). **Install this file on your Rust game server** as `oxide/plugins/Prison.cs` or the equivalent Carbon plugin path, replacing the previous Prison plugin. Reload with `oxide.reload Prison` in the Rust server console. Deploying the Railway Node service does **not** install Rust plugins.
+The actual custom **Prison v3.4.0** Rust plugin has been patched as **Prison v3.4.3** in [`server-plugin/Prison.cs`](server-plugin/Prison.cs). **Install this file on your Rust game server** as `oxide/plugins/Prison.cs` or the equivalent Carbon plugin path, replacing the previous Prison plugin. Reload with `oxide.reload Prison` in the Rust server console. Deploying the Railway Node service does **not** install Rust plugins.
 
 The patched `JailPlayer()` function broadcasts a screenshot-style prison message and emits a `[5HEADS_PRISON]` JSON message to the Rust server console for every successful jail (admin UI, `/prison`, `prison` console command, offline pending jail on connection, and `ApiJailPlayer`), including Steam ID, original username, actual prison reason and sentence duration. The Railway bot consumes this event via WebRCON and sends separate messages:
 - **Owner logs**: includes reason.
 - **VIP**: shows who and when, **hides the reason**.
 
-The old hard-coded exclusion for two admin Steam IDs has been removed. The in-game broadcast now matches the supplied **Combat Prison** chat style: green header, gold player name and Steam ID, sentence duration and reason. The jailed player also receives their reason privately. **Reasons are visible to everyone in Rust chat**, but remain hidden from the VIP Discord channel. The old `Discord.WebhookURL` plugin setting is no longer used; Discord credentials remain configured in Railway as `DISCORD_OWNER_LOG_WEBHOOK` and `DISCORD_VIP_LOG_WEBHOOK`.
+The old hard-coded exclusion for two admin Steam IDs has been removed. The in-game broadcast uses **5Heads Arena** branding with a green header, gold player name and Steam ID, sentence duration and reason. The jailed player also receives their reason privately. **Reasons are visible to everyone in Rust chat**, but remain hidden from the VIP Discord channel. The old `Discord.WebhookURL` plugin setting is no longer used; Discord credentials remain configured in Railway as `DISCORD_OWNER_LOG_WEBHOOK` and `DISCORD_VIP_LOG_WEBHOOK`.
 
 **Announcement format:**
 
 ```
-[Combat Prison] PlayerName(7656119...) locked up for 20 minutes - Reason: Toxicity
+[5Heads Arena] PlayerName(7656119...) locked up for 20 minutes - Reason: Toxicity
 ```
+
+Automatic sentence-completed releases are announced as `[5Heads Arena] PlayerName(7656119...) has been released - sentence completed`. Admin releases say `released by admin`. The original screenshot's `Combat Prison` release line was not present in the uploaded `Prison.cs`; if another plugin is generating it, that plugin must be reconfigured, edited or disabled separately.
 
 Timed and permanent sentences are formatted from the actual server plugin sentence. The Arena bot now sends an optional `--duration-minutes=N` argument with its automatic jail commands to keep the prison plugin's announced sentence aligned with its timer. The Arena bot no longer sends a duplicate in-game prison notification. Manual admin UI jails use the configured Prison sentence length. The original Combat Prison plugin that produces the screenshot is separate; only events handled by this `Prison.cs` and the bot are affected.
 
