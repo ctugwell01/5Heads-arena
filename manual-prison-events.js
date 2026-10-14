@@ -17,7 +17,13 @@ function parseManualPrisonEvent(line) {
   const username = String(parsed.username || '').replace(/[\r\n]/g, ' ').trim().slice(0, 128) || 'Unknown';
   const reason = String(parsed.reason || '').replace(/[\r\n]/g, ' ').trim().slice(0, 256)
     || 'Not supplied by admin UI';
-  return { userId: steamId, username, reason };
+  const event = { userId: steamId, username, reason };
+  // An absent field means the emitting plugin did not provide a duration.
+  if (Number.isSafeInteger(parsed.durationSeconds) && parsed.durationSeconds >= 0 &&
+      parsed.durationSeconds <= 525600 * 60) {
+    event.durationSeconds = parsed.durationSeconds;
+  }
+  return event;
 }
 
 module.exports = { parseManualPrisonEvent, EVENT_MARKER };
