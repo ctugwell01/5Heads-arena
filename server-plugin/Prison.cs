@@ -9,7 +9,7 @@ using System.Linq;
 
 namespace Oxide.Plugins
 {
-    [Info("Prison", "5HeadNN", "3.4.5")]
+    [Info("Prison", "5HeadNN", "3.4.6")]
     [Description("Prison system with detailed in-game admin UI — /prison to open")]
     public class Prison : RustPlugin
     {
@@ -1775,7 +1775,7 @@ namespace Oxide.Plugins
 
         protected override void LoadDefaultConfig()
         {
-            Config["Prison"] = new Dictionary<string, object> { ["X"] = 0f, ["Y"] = 20f, ["Z"] = 0f, ["Radius"] = 6f, ["DecayProtectionRadius"] = 40f };
+            Config["Prison"] = new Dictionary<string, object> { ["X"] = 0f, ["Y"] = 20f, ["Z"] = 0f, ["Radius"] = 6f, ["DecayProtectionRadius"] = 100f };
             Config["Yard"]   = new Dictionary<string, object> { ["X"] = 0f, ["Y"] = 20f, ["Z"] = 0f };
             // sentence length per jail reason, in MINUTES. 0 = indefinite (only /unjail lets them out).
             // "Default" is used for any reason that doesn't match one of these exactly (e.g. free-typed
@@ -1810,11 +1810,18 @@ namespace Oxide.Plugins
                 ["Default"]      = 0f,
             };
             bool changed = false;
-            // Existing configs from older versions did not have a separate
-            // anti-decay radius. Supply it without altering movement Radius.
-            if (Config["Prison", "DecayProtectionRadius"] == null)
+            // Install the requested 100m anti-decay protection on new servers
+            // and servers still using the previous 40m default. Preserve other
+            // explicitly customised radii and never change movement Radius.
+            object existingDecayRadius = Config["Prison", "DecayProtectionRadius"];
+            bool previousDefaultRadius = existingDecayRadius != null &&
+                float.TryParse(existingDecayRadius.ToString(),
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float oldDecayRadius) &&
+                oldDecayRadius == 40f;
+            if (existingDecayRadius == null || previousDefaultRadius)
             {
-                Config["Prison", "DecayProtectionRadius"] = 40f;
+                Config["Prison", "DecayProtectionRadius"] = 100f;
                 changed = true;
             }
             foreach (var kvp in defaults)
