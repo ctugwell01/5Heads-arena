@@ -79,6 +79,7 @@ Current event types include:
 - `promotion_shown`
 - `event_started`
 - `event_stopped`
+- `ai_question` — private read-only player question for the Railway AI assistant
 
 ## Command poll response
 
