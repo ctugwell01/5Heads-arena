@@ -1,0 +1,40 @@
+{
+  "Enabled": false,
+  "Server ID": "5heads-arena-main",
+  "API Base URL": "https://5heads-arena-production.up.railway.app",
+  "API Secret": "CHANGE_ME_MATCH_RAILWAY_AI_BRIDGE_SECRET",
+  "Allow insecure HTTP (local testing only)": false,
+  "Heartbeat seconds": 10.0,
+  "Command poll seconds": 2.0,
+  "Event flush seconds": 5.0,
+  "Command result retry seconds": 5.0,
+  "Network timeout milliseconds": 5000.0,
+  "Max queued events": 500,
+  "Max queued command results": 250,
+  "Max commands per poll": 10,
+  "Remember processed command IDs": 500,
+  "Include player names in telemetry": true,
+  "Allowed actions": [
+    "send_lobby_announcement",
+    "send_lobby_popup",
+    "send_player_message",
+    "get_status_snapshot",
+    "start_event",
+    "stop_event"
+  ],
+  "Critical plugins": [
+    "CoreLobby"
+  ],
+  "Known gamemodes": [
+    { "Key": "GunGame", "DisplayName": "Gun Game", "PluginName": "GunGame" },
+    { "Key": "AKFFA", "DisplayName": "AK FFA", "PluginName": "AKFFA" },
+    { "Key": "AKTDM", "DisplayName": "TDM AK", "PluginName": "AKTDM" },
+    { "Key": "PrimitiveFFA", "DisplayName": "Primitive FFA", "PluginName": "PrimitiveFFA" },
+    { "Key": "PublicDuels", "DisplayName": "Public Duels", "PluginName": "PublicDuels" },
+    { "Key": "AimTrain", "DisplayName": "Aim Train", "PluginName": "AimTrain" },
+    { "Key": "FragIsland", "DisplayName": "Frag Island", "PluginName": "FragIsland" },
+    { "Key": "MazePvP", "DisplayName": "Maze PvP", "PluginName": "MazePvP" },
+    { "Key": "KOTH", "DisplayName": "Hardpoint", "PluginName": "KOTH" }
+  ],
+  "Approved AI events": {}
+}
