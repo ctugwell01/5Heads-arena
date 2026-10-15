@@ -8,6 +8,7 @@ function createAiManagerApi(o={}){
   const secret=o.bridgeSecret||process.env.AI_BRIDGE_SECRET||'';
   const adminToken=o.adminToken||process.env.AI_ADMIN_TOKEN||'';
   const skew=nint(o.maxClockSkewSeconds||process.env.AI_BRIDGE_CLOCK_SKEW_SECONDS,10,300,60);
+  const onEvent=typeof o.onEvent==='function'?o.onEvent:null;
   fs.mkdirSync(dataDir,{recursive:true});
   const f={
     heartbeat:path.join(dataDir,'ai_bridge_heartbeat.json'),
@@ -19,6 +20,24 @@ function createAiManagerApi(o={}){
   };
   let commands=readJson(f.commands,[]); if(!Array.isArray(commands))commands=[];
   const nonces=new Map();
+  const seenEventIds=new Set(tail(f.events,2000).map(x=>x&&x.event_id).filter(Boolean));
+
+  function rememberEventId(eventId){
+    if(!eventId)return;
+    seenEventIds.add(eventId);
+    if(seenEventIds.size>4000){
+      const keep=Array.from(seenEventIds).slice(-2000);
+      seenEventIds.clear();
+      for(const id of keep)seenEventIds.add(id);
+    }
+  }
+  function dispatchAcceptedEvent(event){
+    if(!onEvent)return;
+    Promise.resolve(onEvent(event,{
+      getLatestHeartbeat:()=>readJson(f.heartbeat,null),
+      queueInternalCommand
+    })).catch(e=>console.error('[AI API] Event handler failed:',e.message));
+  }
 
   function audit(type,extra={}){append(f.audit,{audit_id:'audit_'+id(),at:new Date().toISOString(),type,server_id:serverId,...extra});}
   function saveCommands(){atomic(f.commands,commands);}
@@ -72,7 +91,15 @@ function createAiManagerApi(o={}){
   function events(req,res,raw){
     if(req.method!=='POST')return method(res,'POST'); const b=parse(raw,res); if(!b)return true;
     if(b.protocol_version!==1||!Array.isArray(b.events)||b.events.length>20)return sendErr(res,400,'INVALID_REQUEST','Invalid event batch.');
-    let accepted=0; for(const e of b.events){if(e&&e.protocol_version===1&&e.server_id===serverId&&typeof e.event_id==='string'&&typeof e.event_type==='string'){append(f.events,{received_at:new Date().toISOString(),...e});accepted++;}}
+    let accepted=0;
+    for(const e of b.events){
+      if(!e||e.protocol_version!==1||e.server_id!==serverId||typeof e.event_id!=='string'||typeof e.event_type!=='string')continue;
+      if(seenEventIds.has(e.event_id))continue;
+      append(f.events,{received_at:new Date().toISOString(),...e});
+      rememberEventId(e.event_id);
+      accepted++;
+      dispatchAcceptedEvent(e);
+    }
     trim(f.events,16e6,10000); return json(res,200,{...ok(),accepted});
   }
   function expire(){
