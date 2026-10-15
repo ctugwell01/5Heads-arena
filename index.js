@@ -3,6 +3,7 @@ const fs = require('fs');
 const http = require('http');
 const { buildPrisonEmbeds } = require('./prison-logs');
 const { parseManualPrisonEvent } = require('./manual-prison-events');
+const { createAiManagerApi } = require('./ai-manager-api');
 
 const RCON_HOST = process.env.RCON_HOST;
 const RCON_PORT = process.env.RCON_PORT || '28152';
@@ -28,6 +29,7 @@ try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {
   console.error('[STORAGE] Could not create data directory ' + DATA_DIR + ':', e.message);
   process.exit(1);
 }
+const aiManagerApi = createAiManagerApi({ dataDir: DATA_DIR });
 const EXAMPLES_FILE = DATA_DIR + '/bot_examples.json';
 const BLOCKED_FILE  = DATA_DIR + '/blocked_words.json';
 const OFFENCES_FILE = DATA_DIR + '/spam_offences.json';
@@ -791,14 +793,32 @@ function validateConfig() {
 
 function startHealthServer() {
   const port = Number(process.env.PORT || 3000);
-  const server = http.createServer(function(req, res) {
+  const server = http.createServer(async function(req, res) {
+    try {
+      const handledByAiManager = await aiManagerApi.handle(req, res);
+      if (handledByAiManager) return;
+    } catch (e) {
+      console.error('[AI API] Unhandled HTTP error:', e.message);
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ status: 'error', error: 'AI Manager request failed' }));
+      }
+      return;
+    }
+
     if (req.url !== '/' && req.url !== '/health' && req.url !== '/ready') {
       res.statusCode = 404;
       res.end('Not found');
       return;
     }
     const connected = !!ws && ws.readyState === WebSocket.OPEN;
-    const payload = JSON.stringify({ status: 'ok', rcon: connected ? 'connected' : 'disconnected', uptimeSeconds: Math.floor(process.uptime()) });
+    const payload = JSON.stringify({
+      status: 'ok',
+      rcon: connected ? 'connected' : 'disconnected',
+      aiManager: aiManagerApi.isConfigured() ? 'configured' : 'not_configured',
+      uptimeSeconds: Math.floor(process.uptime())
+    });
     res.setHeader('Content-Type', 'application/json');
     res.statusCode = req.url === '/ready' && !connected ? 503 : 200;
     res.end(payload);

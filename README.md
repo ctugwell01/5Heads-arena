@@ -134,3 +134,33 @@ The bot redacts the RCON password from connection logs.
 npm install
 npm run check
 ```
+
+
+## FiveHeads AI Manager bridge
+
+The Railway service also hosts the Phase 1 API used by `FiveHeadsAIBridge.cs`. It is integrated into the existing Node process, so the moderation/RCON bot and the AI bridge share the same Railway service and `/data` volume.
+
+Required Railway variables for the bridge:
+
+- `AI_BRIDGE_SERVER_ID=5heads-arena-main`
+- `AI_BRIDGE_SECRET` — random secret of at least 32 characters; this exact value also goes in Carbon's `FiveHeadsAIBridge.json`
+- `AI_ADMIN_TOKEN` — separate random token for Railway admin/audit endpoints; never put this in the Rust config
+- `AI_BRIDGE_CLOCK_SKEW_SECONDS=60`
+
+Carbon endpoints are HMAC-SHA256 authenticated and replay protected:
+
+- `POST /v1/servers/{serverId}/heartbeat`
+- `POST /v1/servers/{serverId}/events`
+- `GET /v1/servers/{serverId}/commands?limit=10`
+- `POST /v1/servers/{serverId}/command-results`
+
+Railway-only admin endpoints use `Authorization: Bearer <AI_ADMIN_TOKEN>`:
+
+- `GET /v1/admin/state`
+- `GET /v1/admin/events`
+- `GET /v1/admin/audit`
+- `POST /v1/admin/commands`
+
+`GET /ai-health` reports whether the API is configured and when the most recent Rust heartbeat arrived. Heartbeats, events, commands, results and audit records are persisted under `DATA_DIR` (normally the existing Railway volume at `/data`).
+
+The Railway API has the same Phase 1 allowlist as Carbon. There is no raw RCON, shell, arbitrary console command, filesystem command or arbitrary plugin-call endpoint.
