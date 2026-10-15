@@ -164,3 +164,25 @@ Railway-only admin endpoints use `Authorization: Bearer <AI_ADMIN_TOKEN>`:
 `GET /ai-health` reports whether the API is configured and when the most recent Rust heartbeat arrived. Heartbeats, events, commands, results and audit records are persisted under `DATA_DIR` (normally the existing Railway volume at `/data`).
 
 The Railway API has the same Phase 1 allowlist as Carbon. There is no raw RCON, shell, arbitrary console command, filesystem command or arbitrary plugin-call endpoint.
+
+
+### Carbon AI bridge files
+
+The Rust-side bridge is versioned in GitHub at:
+
+- `server-plugin/FiveHeadsAIBridge.cs` — Carbon plugin.
+- `server-plugin/FiveHeadsAIBridge.example.json` — safe config template with no production secret.
+- `FiveHeadsAIBridge_API.md` — protocol/authentication contract.
+
+Install `FiveHeadsAIBridge.cs` on the Rust server, copy the example config to `FiveHeadsAIBridge.json`, then set the real `API Secret` to the same value as Railway's `AI_BRIDGE_SECRET`. The real config filename is gitignored so the shared secret is not committed.
+
+Current Carbon bridge: **v1.0.1**. This build includes the Carbon compatibility fixes for `Oxide.Plugins.Timer`, the Unity/Oxide `Time` namespace collision, and encrypted `BasePlayer.userID` values.
+
+Admin diagnostics:
+
+```
+/aibridge status
+/aibridge heartbeat
+/aibridge flush
+/aibridge popup
+```
