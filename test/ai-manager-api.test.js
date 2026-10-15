@@ -108,3 +108,75 @@ test('raw RCON is rejected by Railway allowlist', async t => {
   assert.equal(response.status, 400);
   assert.equal((await response.json()).error.code, 'ACTION_NOT_ALLOWED');
 });
+
+
+test('AI question event is dispatched once', async t => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), '5heads-ai-event-'));
+  const serverId = '5heads-arena-main';
+  const secret = 's'.repeat(64);
+  const adminToken = 'a'.repeat(48);
+  let calls = 0;
+  let lastEvent = null;
+  const { createAiManagerApi } = require('../ai-manager-api');
+  const api = createAiManagerApi({
+    dataDir,
+    serverId,
+    bridgeSecret: secret,
+    adminToken,
+    onEvent: async event => {
+      calls += 1;
+      lastEvent = event;
+    }
+  });
+  const server = http.createServer(async (req, res) => {
+    if (!await api.handle(req, res)) {
+      res.statusCode = 404;
+      res.end('Not found');
+    }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const target = '/v1/servers/' + serverId + '/events';
+  const bodyObject = {
+    protocol_version: 1,
+    events: [{
+      protocol_version: 1,
+      event_id: 'evt_ai_test_1',
+      server_id: serverId,
+      instance_id: 'instance',
+      event_type: 'ai_question',
+      occurred_at: new Date().toISOString(),
+      player: { steam_id: '76561198000000000', name: 'Tester' },
+      data: { question: 'How many players are online?', source: 'rust_chat' }
+    }]
+  };
+  const body = JSON.stringify(bodyObject);
+
+  function headers(nonce) {
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
+    const canonical = ['POST', target, timestamp, nonce, bodyHash].join('\n');
+    return {
+      'content-type': 'application/json',
+      'x-5h-server-id': serverId,
+      'x-5h-timestamp': timestamp,
+      'x-5h-nonce': nonce,
+      'x-5h-body-sha256': bodyHash,
+      'x-5h-signature': crypto.createHmac('sha256', secret).update(canonical).digest('hex'),
+      'x-5h-protocol-version': '1'
+    };
+  }
+
+  const one = await fetch(base + target, { method: 'POST', headers: headers(crypto.randomUUID()), body });
+  assert.equal(one.status, 200);
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(calls, 1);
+  assert.equal(lastEvent.event_type, 'ai_question');
+
+  const two = await fetch(base + target, { method: 'POST', headers: headers(crypto.randomUUID()), body });
+  assert.equal(two.status, 200);
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(calls, 1);
+});
