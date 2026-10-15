@@ -14,7 +14,7 @@ using Timer = Oxide.Plugins.Timer;
 
 namespace Carbon.Plugins;
 
-[Info("FiveHeadsAIBridge", "5HeadNN", "1.0.1")]
+[Info("FiveHeadsAIBridge", "5HeadNN", "1.1.0")]
 [Description("Safe outbound bridge between 5Heads Arena / CoreLobby and the Railway AI Manager.")]
 public class FiveHeadsAIBridge : CarbonPlugin
 {
@@ -45,6 +45,7 @@ public class FiveHeadsAIBridge : CarbonPlugin
     private readonly HashSet<string> _processedCommandIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<ulong, string> _knownPlayerModes = new();
     private readonly Dictionary<ulong, double> _connectedAt = new();
+    private readonly Dictionary<ulong, double> _aiQuestionCooldowns = new();
     private Dictionary<string, Func<AiCommand, CommandResultEnvelope>> _commandHandlers;
 
     #region Configuration
@@ -108,6 +109,15 @@ public class FiveHeadsAIBridge : CarbonPlugin
 
         [JsonProperty("Include player names in telemetry")]
         public bool IncludePlayerNames = true;
+
+        [JsonProperty("Enable player /ai command")]
+        public bool EnablePlayerAiCommand = true;
+
+        [JsonProperty("Player /ai cooldown seconds")]
+        public float PlayerAiCooldownSeconds = 10f;
+
+        [JsonProperty("Max player /ai question characters")]
+        public int MaxPlayerAiQuestionCharacters = 200;
 
         [JsonProperty("Allowed actions")]
         public List<string> AllowedActions = new()
@@ -182,6 +192,8 @@ public class FiveHeadsAIBridge : CarbonPlugin
         _config.MaxQueuedResults = Mathf.Clamp(_config.MaxQueuedResults, 25, 2000);
         _config.MaxCommandsPerPoll = Mathf.Clamp(_config.MaxCommandsPerPoll, 1, 50);
         _config.RememberProcessedCommandIds = Mathf.Clamp(_config.RememberProcessedCommandIds, 50, 5000);
+        _config.PlayerAiCooldownSeconds = Mathf.Clamp(_config.PlayerAiCooldownSeconds, 3f, 120f);
+        _config.MaxPlayerAiQuestionCharacters = Mathf.Clamp(_config.MaxPlayerAiQuestionCharacters, 40, 500);
 
         SaveConfig();
     }
@@ -472,6 +484,7 @@ public class FiveHeadsAIBridge : CarbonPlugin
 
         _knownPlayerModes.Remove((ulong)player.userID);
         _connectedAt.Remove((ulong)player.userID);
+        _aiQuestionCooldowns.Remove((ulong)player.userID);
         CuiHelper.DestroyUi(player, PopupUiName);
     }
 
@@ -999,3 +1012,712 @@ public class FiveHeadsAIBridge : CarbonPlugin
         });
 
         return Result(command.CommandId, "succeeded", new JObject
+        {
+            ["players_reached"] = reached
+        });
+    }
+
+    private CommandResultEnvelope HandlePlayerMessage(AiCommand command)
+    {
+        string steamIdText = GetTextArgument(command, "steam_id", 17, 24, out var error, false);
+        if (error != null) return error;
+
+        if (!ulong.TryParse(steamIdText, out var steamId))
+            return Reject(command.CommandId, "INVALID_ARGUMENTS", "steam_id must be a numeric Steam ID.");
+
+        string message = GetTextArgument(command, "message", 1, 180, out error);
+        if (error != null) return error;
+
+        var player = BasePlayer.FindByID(steamId);
+        if (player == null || !player.IsConnected)
+            return Reject(command.CommandId, "PLAYER_NOT_CONNECTED", "Player is not connected.");
+
+        player.ChatMessage(
+            $"<color=#A855F7><b>5HEADS AI</b></color> {EscapePlayerText(message)}");
+
+        return Result(command.CommandId, "succeeded", new JObject
+        {
+            ["steam_id"] = steamId.ToString()
+        });
+    }
+
+    private CommandResultEnvelope HandleStatusSnapshot(AiCommand command)
+    {
+        var heartbeat = BuildHeartbeat();
+        return Result(command.CommandId, "succeeded", JObject.FromObject(heartbeat));
+    }
+
+    private CommandResultEnvelope HandleApprovedEvent(AiCommand command, bool start)
+    {
+        string eventId = GetTextArgument(command, "event_id", 1, 64, out var error, false);
+        if (error != null) return error;
+
+        if (_config.ApprovedEvents == null ||
+            !_config.ApprovedEvents.TryGetValue(eventId, out var target) ||
+            target == null ||
+            string.IsNullOrWhiteSpace(target.PluginName))
+        {
+            return Reject(command.CommandId, "EVENT_NOT_FOUND",
+                "Event is not present in the Carbon approved-event registry.");
+        }
+
+        var plugin = plugins.Find(target.PluginName);
+        if (plugin == null)
+            return Reject(command.CommandId, "PLUGIN_NOT_FOUND",
+                $"Approved event plugin '{target.PluginName}' is not loaded.");
+
+        object callResult;
+
+        if (start)
+        {
+            int durationMinutes = Mathf.RoundToInt(GetFloatArgument(command, "duration_minutes", 30f));
+            int maxDuration = Mathf.Clamp(target.MaxDurationMinutes, 1, 240);
+
+            if (durationMinutes < 1 || durationMinutes > maxDuration)
+                return Reject(command.CommandId, "OUT_OF_RANGE",
+                    $"duration_minutes must be between 1 and {maxDuration}.");
+
+            // Approved event plugins can opt in by implementing:
+            // [HookMethod("AI_StartEvent")] object AI_StartEvent(int durationMinutes)
+            callResult = plugin.Call("AI_StartEvent", durationMinutes);
+        }
+        else
+        {
+            // Approved event plugins can opt in by implementing:
+            // [HookMethod("AI_StopEvent")] object AI_StopEvent()
+            callResult = plugin.Call("AI_StopEvent");
+        }
+
+        if (callResult is bool ok && !ok)
+            return Fail(command.CommandId, "PLUGIN_CALL_FAILED",
+                $"Plugin '{target.PluginName}' rejected the AI event action.");
+
+        QueueEvent(start ? "event_started" : "event_stopped", null, new JObject
+        {
+            ["event_id"] = eventId,
+            ["plugin"] = target.PluginName,
+            ["source"] = "ai"
+        });
+
+        return Result(command.CommandId, "succeeded", new JObject
+        {
+            ["event_id"] = eventId,
+            ["plugin"] = target.PluginName
+        });
+    }
+
+    #endregion
+
+    #region Lobby popup UI
+
+    private void ShowLobbyPopup(BasePlayer player, string title, string message, string subtext, float seconds)
+    {
+        if (!IsLobbyPlayer(player)) return;
+
+        CuiHelper.DestroyUi(player, PopupUiName);
+
+        var ui = new CuiElementContainer();
+
+        var frame = ui.Add(new CuiPanel
+        {
+            Image = { Color = "0.58 0.16 1.00 0.98" },
+            RectTransform =
+            {
+                AnchorMin = "0.315 0.855",
+                AnchorMax = "0.685 0.945"
+            },
+            CursorEnabled = false
+        }, "Overlay", PopupUiName);
+
+        var body = ui.Add(new CuiPanel
+        {
+            Image = { Color = "0.018 0.019 0.032 0.965" },
+            RectTransform =
+            {
+                AnchorMin = "0 0",
+                AnchorMax = "1 1",
+                OffsetMin = "2 2",
+                OffsetMax = "-2 -2"
+            }
+        }, frame);
+
+        ui.Add(new CuiPanel
+        {
+            Image = { Color = "0.69 0.20 1.00 1" },
+            RectTransform =
+            {
+                AnchorMin = "0 0",
+                AnchorMax = "0 1",
+                OffsetMax = "6 0"
+            }
+        }, body);
+
+        ui.Add(new CuiLabel
+        {
+            Text =
+            {
+                Text = EscapePlayerText(title),
+                FontSize = 15,
+                Align = TextAnchor.MiddleLeft,
+                Color = "0.965 0.955 0.995 1",
+                Font = "robotocondensed-bold.ttf"
+            },
+            RectTransform =
+            {
+                AnchorMin = "0 0.58",
+                AnchorMax = "1 1",
+                OffsetMin = "22 0",
+                OffsetMax = "-18 0"
+            }
+        }, body);
+
+        ui.Add(new CuiLabel
+        {
+            Text =
+            {
+                Text = EscapePlayerText(message),
+                FontSize = 13,
+                Align = TextAnchor.MiddleLeft,
+                Color = "0.69 0.20 1.00 1",
+                Font = "robotocondensed-bold.ttf"
+            },
+            RectTransform =
+            {
+                AnchorMin = "0 0.30",
+                AnchorMax = "1 0.66",
+                OffsetMin = "22 0",
+                OffsetMax = "-18 0"
+            }
+        }, body);
+
+        ui.Add(new CuiLabel
+        {
+            Text =
+            {
+                Text = EscapePlayerText(subtext ?? string.Empty),
+                FontSize = 10,
+                Align = TextAnchor.MiddleLeft,
+                Color = "0.70 0.66 0.79 1",
+                Font = "robotocondensed-regular.ttf"
+            },
+            RectTransform =
+            {
+                AnchorMin = "0 0",
+                AnchorMax = "1 0.34",
+                OffsetMin = "22 2",
+                OffsetMax = "-18 0"
+            }
+        }, body);
+
+        CuiHelper.AddUi(player, ui);
+
+        timer.Once(seconds, () =>
+        {
+            if (player != null && !player.IsDestroyed)
+                CuiHelper.DestroyUi(player, PopupUiName);
+        });
+    }
+
+    #endregion
+
+    #region Command results
+
+    private CommandResultEnvelope Result(string commandId, string status, JObject result = null)
+    {
+        return new CommandResultEnvelope
+        {
+            CommandId = commandId,
+            ServerId = _config.ServerId,
+            Status = status,
+            FinishedAt = UtcNowIso(),
+            Result = result
+        };
+    }
+
+    private CommandResultEnvelope Reject(
+        string commandId,
+        string code,
+        string message,
+        string status = "rejected")
+    {
+        return new CommandResultEnvelope
+        {
+            CommandId = commandId,
+            ServerId = _config.ServerId,
+            Status = status,
+            FinishedAt = UtcNowIso(),
+            Error = new CommandError
+            {
+                Code = code,
+                Message = message
+            }
+        };
+    }
+
+    private CommandResultEnvelope Fail(string commandId, string code, string message)
+    {
+        return Reject(commandId, code, message, "failed");
+    }
+
+    private void SubmitCommandResult(CommandResultEnvelope result)
+    {
+        if (result == null || string.IsNullOrWhiteSpace(result.CommandId))
+            return;
+
+        if (_resultQueue.Any(x =>
+                string.Equals(x.CommandId, result.CommandId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(x.Status, result.Status, StringComparison.OrdinalIgnoreCase)))
+            return;
+
+        _resultQueue.Add(result);
+
+        int max = Mathf.Max(25, _config.MaxQueuedResults);
+        while (_resultQueue.Count > max)
+            _resultQueue.RemoveAt(0);
+
+        TryPostCommandResult(result);
+    }
+
+    private void FlushCommandResults()
+    {
+        if (_resultQueue.Count == 0 || !IsNetworkConfigured(out _))
+            return;
+
+        foreach (var result in _resultQueue.Take(10).ToList())
+            TryPostCommandResult(result);
+    }
+
+    private void TryPostCommandResult(CommandResultEnvelope result)
+    {
+        if (result == null ||
+            string.IsNullOrWhiteSpace(result.CommandId) ||
+            _resultInFlight.Contains(result.CommandId) ||
+            !IsNetworkConfigured(out _))
+            return;
+
+        _resultInFlight.Add(result.CommandId);
+
+        string body = Serialize(result);
+        string path = $"/v1/servers/{Uri.EscapeDataString(_config.ServerId)}/command-results";
+        string url = BuildUrl(path);
+
+        SendRequest(RequestMethod.POST, url, body, (code, response) =>
+        {
+            _resultInFlight.Remove(result.CommandId);
+
+            if (IsHttpSuccess(code))
+            {
+                _resultQueue.Remove(result);
+                return;
+            }
+
+            PrintNetworkWarning("command result", code, response);
+        });
+    }
+
+    #endregion
+
+    #region HTTP + authentication
+
+    private bool IsNetworkConfigured(out string reason)
+    {
+        reason = null;
+
+        if (_config == null || !_config.Enabled)
+        {
+            reason = "bridge is disabled";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(_config.ServerId))
+        {
+            reason = "Server ID is empty";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(_config.ApiBaseUrl) ||
+            _config.ApiBaseUrl.Contains("YOUR-RAILWAY-SERVICE", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "API Base URL has not been configured";
+            return false;
+        }
+
+        if (!Uri.TryCreate(_config.ApiBaseUrl, UriKind.Absolute, out var uri))
+        {
+            reason = "API Base URL is invalid";
+            return false;
+        }
+
+        if (!uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+            !_config.AllowInsecureHttp)
+        {
+            reason = "API Base URL must use HTTPS";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(_config.ApiSecret) ||
+            _config.ApiSecret.Equals("CHANGE_ME", StringComparison.OrdinalIgnoreCase) ||
+            _config.ApiSecret.Length < 32)
+        {
+            reason = "API Secret must be changed to a random value of at least 32 characters";
+            return false;
+        }
+
+        return true;
+    }
+
+    private string BuildUrl(string path)
+    {
+        return _config.ApiBaseUrl.TrimEnd('/') + path;
+    }
+
+    private void SendRequest(
+        RequestMethod method,
+        string url,
+        string body,
+        Action<int, string> callback)
+    {
+        string payload = body ?? string.Empty;
+        var headers = BuildSignedHeaders(method, url, payload);
+
+        webrequest.Enqueue(
+            url,
+            method == RequestMethod.GET ? null : payload,
+            (code, response) => callback?.Invoke(code, response),
+            this,
+            method,
+            headers,
+            _config.NetworkTimeoutMilliseconds);
+    }
+
+    private Dictionary<string, string> BuildSignedHeaders(
+        RequestMethod method,
+        string url,
+        string body)
+    {
+        long timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string nonce = Guid.NewGuid().ToString("N");
+        string bodyHash = Sha256Hex(body ?? string.Empty);
+
+        var uri = new Uri(url);
+        string requestTarget = uri.PathAndQuery;
+        string methodName = method.ToString().ToUpperInvariant();
+
+        string canonical =
+            methodName + "\n" +
+            requestTarget + "\n" +
+            timestamp + "\n" +
+            nonce + "\n" +
+            bodyHash;
+
+        string signature = HmacSha256Hex(_config.ApiSecret, canonical);
+
+        return new Dictionary<string, string>
+        {
+            ["Content-Type"] = "application/json",
+            ["Accept"] = "application/json",
+            ["X-5H-Server-ID"] = _config.ServerId,
+            ["X-5H-Timestamp"] = timestamp.ToString(),
+            ["X-5H-Nonce"] = nonce,
+            ["X-5H-Body-SHA256"] = bodyHash,
+            ["X-5H-Signature"] = signature,
+            ["X-5H-Protocol-Version"] = ProtocolVersion.ToString()
+        };
+    }
+
+    private static string Sha256Hex(string value)
+    {
+        using var sha = SHA256.Create();
+        byte[] bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value ?? string.Empty));
+        return BytesToHex(bytes);
+    }
+
+    private static string HmacSha256Hex(string secret, string value)
+    {
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret ?? string.Empty));
+        byte[] bytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(value ?? string.Empty));
+        return BytesToHex(bytes);
+    }
+
+    private static string BytesToHex(byte[] bytes)
+    {
+        var sb = new StringBuilder(bytes.Length * 2);
+        foreach (byte b in bytes)
+            sb.Append(b.ToString("x2"));
+        return sb.ToString();
+    }
+
+    private static bool IsHttpSuccess(int code) => code >= 200 && code <= 299;
+
+    private void PrintNetworkWarning(string operation, int code, string response)
+    {
+        string safeResponse = SafeTelemetryText(response, 180);
+        PrintWarning(
+            $"AI bridge {operation} failed: HTTP {code}" +
+            (string.IsNullOrWhiteSpace(safeResponse) ? string.Empty : $" | {safeResponse}"));
+    }
+
+    #endregion
+
+    #region Argument validation
+
+    private string GetTextArgument(
+        AiCommand command,
+        string key,
+        int minLength,
+        int maxLength,
+        out CommandResultEnvelope error,
+        bool sanitize = true)
+    {
+        error = null;
+
+        string value = command?.Arguments?[key]?.Type == JTokenType.String
+            ? command.Arguments[key].Value<string>()
+            : null;
+
+        if (value == null)
+        {
+            error = Reject(command?.CommandId, "INVALID_ARGUMENTS", $"'{key}' is required.");
+            return null;
+        }
+
+        value = value.Trim();
+
+        if (value.Length < minLength || value.Length > maxLength)
+        {
+            error = Reject(command?.CommandId, "INVALID_ARGUMENTS",
+                $"'{key}' must be between {minLength} and {maxLength} characters.");
+            return null;
+        }
+
+        if (value.Any(char.IsControl))
+        {
+            error = Reject(command?.CommandId, "INVALID_ARGUMENTS",
+                $"'{key}' contains control characters.");
+            return null;
+        }
+
+        return sanitize ? EscapePlayerText(value) : value;
+    }
+
+    private string GetOptionalTextArgument(AiCommand command, string key, int maxLength)
+    {
+        var token = command?.Arguments?[key];
+        if (token == null || token.Type == JTokenType.Null)
+            return string.Empty;
+
+        string value = token.Type == JTokenType.String ? token.Value<string>() : string.Empty;
+        value = (value ?? string.Empty).Trim();
+
+        if (value.Length > maxLength)
+            value = value.Substring(0, maxLength);
+
+        return EscapePlayerText(value);
+    }
+
+    private float GetFloatArgument(AiCommand command, string key, float fallback)
+    {
+        var token = command?.Arguments?[key];
+        if (token == null) return fallback;
+
+        if (token.Type == JTokenType.Integer || token.Type == JTokenType.Float)
+            return token.Value<float>();
+
+        if (token.Type == JTokenType.String &&
+            float.TryParse(token.Value<string>(), out var parsed))
+            return parsed;
+
+        return fallback;
+    }
+
+    private static string EscapePlayerText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+
+        return text
+            .Replace("<", "‹")
+            .Replace(">", "›")
+            .Replace("\r", " ")
+            .Replace("\n", " ")
+            .Trim();
+    }
+
+    private static string SafeTelemetryText(string text, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+
+        string safe = text
+            .Replace("\r", " ")
+            .Replace("\n", " ")
+            .Trim();
+
+        return safe.Length <= maxLength ? safe : safe.Substring(0, maxLength);
+    }
+
+    private static string Serialize(object value)
+    {
+        return JsonConvert.SerializeObject(value, Formatting.None,
+            new JsonSerializerSettings
+            {
+                NullValueHandling = NullValueHandling.Ignore
+            });
+    }
+
+    private static string UtcNowIso() =>
+        DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'");
+
+    #endregion
+
+    #region Player AI command
+
+    [ChatCommand("ai")]
+    private void PlayerAiCommand(BasePlayer player, string command, string[] args)
+    {
+        if (player == null || !player.IsConnected)
+            return;
+
+        if (!_config.EnablePlayerAiCommand)
+        {
+            player.ChatMessage("<color=#ff7a7a>5Heads AI</color> Player AI questions are currently disabled.");
+            return;
+        }
+
+        if (!IsNetworkConfigured(out var reason))
+        {
+            player.ChatMessage($"<color=#ff7a7a>5Heads AI</color> AI is unavailable right now: {EscapePlayerText(reason)}");
+            return;
+        }
+
+        string question = args == null
+            ? string.Empty
+            : string.Join(" ", args).Trim();
+
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            player.ChatMessage("<color=#A855F7><b>5HEADS AI</b></color> Usage: /ai <question>");
+            return;
+        }
+
+        int maxLength = Mathf.Clamp(_config.MaxPlayerAiQuestionCharacters, 40, 500);
+        if (question.Length > maxLength)
+        {
+            player.ChatMessage(
+                $"<color=#ff7a7a>5Heads AI</color> Keep questions under {maxLength} characters.");
+            return;
+        }
+
+        if (question.Any(char.IsControl))
+        {
+            player.ChatMessage("<color=#ff7a7a>5Heads AI</color> That question contains invalid characters.");
+            return;
+        }
+
+        ulong playerId = (ulong)player.userID;
+        double now = UnityEngine.Time.realtimeSinceStartupAsDouble;
+        float cooldown = Mathf.Clamp(_config.PlayerAiCooldownSeconds, 3f, 120f);
+
+        if (_aiQuestionCooldowns.TryGetValue(playerId, out var lastAsked))
+        {
+            double remaining = cooldown - (now - lastAsked);
+            if (remaining > 0.05d)
+            {
+                player.ChatMessage(
+                    $"<color=#A855F7>5Heads AI</color> Try again in {Math.Ceiling(remaining):0}s.");
+                return;
+            }
+        }
+
+        _aiQuestionCooldowns[playerId] = now;
+
+        QueueEvent("ai_question", player, new JObject
+        {
+            ["question"] = SafeTelemetryText(question, maxLength),
+            ["source"] = "rust_chat",
+            ["gamemode"] = GetCoreLobbyPlayerMode(playerId) ?? "lobby"
+        });
+
+        // AI questions are interactive, so do not wait for the normal event flush timer.
+        FlushEvents();
+
+        player.ChatMessage(
+            "<color=#A855F7><b>5HEADS AI</b></color> Thinking...");
+    }
+
+    #endregion
+
+    #region Admin command
+
+    [ChatCommand("aibridge")]
+    private void AiBridgeCommand(BasePlayer player, string command, string[] args)
+    {
+        if (player == null) return;
+
+        if (!player.IsAdmin &&
+            !permission.UserHasPermission(player.UserIDString, AdminPermission))
+        {
+            player.ChatMessage("<color=#ff7a7a>5Heads AI</color> No permission.");
+            return;
+        }
+
+        string sub = args != null && args.Length > 0
+            ? args[0].ToLowerInvariant()
+            : "status";
+
+        switch (sub)
+        {
+            case "status":
+            {
+                bool configured = IsNetworkConfigured(out var reason);
+                player.ChatMessage(
+                    "<color=#A855F7><b>5HEADS AI BRIDGE</b></color>\n" +
+                    $"Enabled: {(_config.Enabled ? "YES" : "NO")}\n" +
+                    $"Configured: {(configured ? "YES" : "NO")}\n" +
+                    $"Server ID: {_config.ServerId}\n" +
+                    $"Instance: {_instanceId}\n" +
+                    $"Events queued: {_eventQueue.Count}\n" +
+                    $"Results queued: {_resultQueue.Count}" +
+                    (configured ? string.Empty : $"\nReason: {reason}"));
+                break;
+            }
+
+            case "heartbeat":
+                if (!IsNetworkConfigured(out var heartbeatReason))
+                {
+                    player.ChatMessage($"<color=#ff7a7a>5Heads AI</color> {heartbeatReason}");
+                    return;
+                }
+
+                SendHeartbeat();
+                player.ChatMessage("<color=#A855F7>5Heads AI</color> Heartbeat queued.");
+                break;
+
+            case "flush":
+                FlushEvents();
+                FlushCommandResults();
+                player.ChatMessage("<color=#A855F7>5Heads AI</color> Queue flush requested.");
+                break;
+
+            case "popup":
+                if (!IsLobbyPlayer(player))
+                {
+                    player.ChatMessage("<color=#ff7a7a>5Heads AI</color> Lobby-only popup test.");
+                    return;
+                }
+
+                ShowLobbyPopup(
+                    player,
+                    "5HEADS AI MANAGER",
+                    "BRIDGE ONLINE",
+                    "Safe command and telemetry layer ready.",
+                    8f);
+                break;
+
+            default:
+                player.ChatMessage(
+                    "<color=#A855F7>5Heads AI</color> /aibridge status | heartbeat | flush | popup");
+                break;
+        }
+    }
+
+    #endregion
+}
