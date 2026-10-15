@@ -29,7 +29,7 @@ try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {
   console.error('[STORAGE] Could not create data directory ' + DATA_DIR + ':', e.message);
   process.exit(1);
 }
-const aiManagerApi = createAiManagerApi({ dataDir: DATA_DIR });
+const aiManagerApi = createAiManagerApi({ dataDir: DATA_DIR, onEvent: handleAiManagerEvent });
 const EXAMPLES_FILE = DATA_DIR + '/bot_examples.json';
 const BLOCKED_FILE  = DATA_DIR + '/blocked_words.json';
 const OFFENCES_FILE = DATA_DIR + '/spam_offences.json';
@@ -238,6 +238,294 @@ async function callAI(prompt, maxTokens) {
   } catch(e) {
     console.error('AI error:', e.message);
     return '';
+  }
+}
+
+
+function compactServerSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return 'No live heartbeat is available.';
+  const server = snapshot.server || {};
+  const modes = Array.isArray(snapshot.gamemodes) ? snapshot.gamemodes : [];
+  const modeText = modes.map(function(m) {
+    return String(m.display_name || m.key || 'Mode') + ': ' + Number(m.players || 0) +
+      ' (' + String(m.status || 'unknown') + ')';
+  }).join(', ');
+  return 'Online ' + Number(server.online || 0) + '/' + Number(server.max_players || 0) +
+    '; lobby ' + Number(server.lobby_players || 0) +
+    (modeText ? '; modes: ' + modeText : '') + '.';
+}
+
+function normalizeAiAnswer(value, maxChars) {
+  let text = String(value || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) text = 'AI is temporarily unavailable. Try again shortly.';
+  if (text.length > maxChars) text = text.slice(0, Math.max(1, maxChars - 1)).trimEnd() + '…';
+  return text;
+}
+
+async function askFiveHeadsAssistant(question, snapshot, source, maxChars) {
+  if (!ANTHROPIC_API_KEY) return 'AI is temporarily unavailable. Try again shortly.';
+
+  const controller = new AbortController();
+  const timeout = setTimeout(function() { controller.abort(); }, 10000);
+  const system = [
+    'You are 5Heads AI, the read-only assistant for the 5Heads Arena Rust server.',
+    'Answer using the live server snapshot when relevant.',
+    'Players choose gamemodes from the CoreLobby lobby gamemode menu.',
+    'Do not claim to have taken actions, changed settings, moderated players, banned, kicked, restarted, wiped, reloaded or executed commands.',
+    'If asked to perform an admin action, say that this interface is read-only and an admin must approve actions.',
+    'If the snapshot does not support a factual answer, say you do not have that information instead of inventing it.',
+    'Be concise, friendly and practical. No markdown tables.'
+  ].join(' ');
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      signal: controller.signal,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: source === 'discord' ? 350 : 120,
+        system,
+        messages: [{
+          role: 'user',
+          content:
+            'Source: ' + source + '\n' +
+            'Live server: ' + compactServerSnapshot(snapshot) + '\n' +
+            'Question: ' + String(question || '').slice(0, 500)
+        }]
+      })
+    });
+    const data = await response.json();
+    if (!response.ok || !data.content || !data.content[0] || !data.content[0].text) {
+      console.error('[5HEADS AI] Provider response failed, HTTP ' + response.status);
+      return 'AI is temporarily unavailable. Try again shortly.';
+    }
+    return normalizeAiAnswer(data.content[0].text, maxChars);
+  } catch (e) {
+    console.error('[5HEADS AI] Question failed:', e.message);
+    return 'AI is temporarily unavailable. Try again shortly.';
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function handleAiManagerEvent(event, context) {
+  if (!event || event.event_type !== 'ai_question') return;
+
+  const steamId = event.player && String(event.player.steam_id || '');
+  const question = event.data && String(event.data.question || '').trim();
+  if (!/^\d{17,24}$/.test(steamId) || question.length < 1 || question.length > 500) return;
+
+  const answer = await askFiveHeadsAssistant(
+    question,
+    context.getLatestHeartbeat(),
+    'rust',
+    180
+  );
+
+  await context.queueInternalCommand('send_player_message', {
+    steam_id: steamId,
+    message: answer
+  }, {
+    reason: 'Private answer to an in-game /ai question.',
+    requested_by: { type: 'player_ai', id: steamId },
+    expires_in_seconds: 60
+  });
+}
+
+let discordAiGateway = null;
+let discordAiHeartbeatTimer = null;
+let discordAiReconnectTimer = null;
+let discordAiSequence = null;
+let discordAiApplicationId = null;
+
+async function discordBotApi(pathname, options) {
+  const opts = options || {};
+  const headers = Object.assign({
+    'Authorization': 'Bot ' + DISCORD_BOT_TOKEN,
+    'Content-Type': 'application/json'
+  }, opts.headers || {});
+  return fetch('https://discord.com/api/v10' + pathname, Object.assign({}, opts, { headers }));
+}
+
+async function registerDiscordAiCommand() {
+  const appResponse = await discordBotApi('/oauth2/applications/@me', { method: 'GET' });
+  if (!appResponse.ok) throw new Error('Discord application lookup failed, HTTP ' + appResponse.status);
+  const app = await appResponse.json();
+  discordAiApplicationId = app.id;
+
+  const commandsResponse = await discordBotApi('/applications/' + app.id + '/commands', { method: 'GET' });
+  if (!commandsResponse.ok) throw new Error('Discord command lookup failed, HTTP ' + commandsResponse.status);
+  const commands = await commandsResponse.json();
+  const current = Array.isArray(commands) ? commands.find(function(c) { return c.name === 'ai'; }) : null;
+
+  const command = {
+    name: 'ai',
+    type: 1,
+    description: 'Ask 5Heads AI about the live Rust server',
+    options: [{
+      type: 3,
+      name: 'question',
+      description: 'What do you want to know?',
+      required: true,
+      max_length: 500
+    }]
+  };
+
+  const pathname = current
+    ? '/applications/' + app.id + '/commands/' + current.id
+    : '/applications/' + app.id + '/commands';
+
+  const response = await discordBotApi(pathname, {
+    method: current ? 'PATCH' : 'POST',
+    body: JSON.stringify(command)
+  });
+  if (!response.ok) throw new Error('Discord /ai registration failed, HTTP ' + response.status);
+  console.log('[DISCORD AI] /ai command registered.');
+}
+
+async function handleDiscordAiInteraction(interaction) {
+  if (!interaction || interaction.type !== 2 || !interaction.data || interaction.data.name !== 'ai') return;
+
+  const option = Array.isArray(interaction.data.options)
+    ? interaction.data.options.find(function(x) { return x.name === 'question'; })
+    : null;
+  const question = option ? String(option.value || '').trim() : '';
+  if (!question) return;
+
+  try {
+    await fetch(
+      'https://discord.com/api/v10/interactions/' + interaction.id + '/' + interaction.token + '/callback',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 5, data: { flags: 64 } })
+      }
+    );
+
+    const answer = await askFiveHeadsAssistant(
+      question,
+      aiManagerApi.getLatestHeartbeat(),
+      'discord',
+      1900
+    );
+
+    const appId = interaction.application_id || discordAiApplicationId;
+    const edit = await fetch(
+      'https://discord.com/api/v10/webhooks/' + appId + '/' + interaction.token + '/messages/@original',
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: answer,
+          allowed_mentions: { parse: [] }
+        })
+      }
+    );
+    if (!edit.ok) console.error('[DISCORD AI] Reply failed, HTTP ' + edit.status);
+  } catch (e) {
+    console.error('[DISCORD AI] Interaction failed:', e.message);
+  }
+}
+
+function scheduleDiscordAiReconnect() {
+  if (discordAiReconnectTimer || !DISCORD_BOT_TOKEN) return;
+  discordAiReconnectTimer = setTimeout(function() {
+    discordAiReconnectTimer = null;
+    connectDiscordAiGateway();
+  }, 5000);
+}
+
+function connectDiscordAiGateway() {
+  if (!DISCORD_BOT_TOKEN) return;
+  if (discordAiGateway &&
+      (discordAiGateway.readyState === WebSocket.OPEN || discordAiGateway.readyState === WebSocket.CONNECTING)) return;
+
+  const socket = new WebSocket('wss://gateway.discord.gg/?v=10&encoding=json', {
+    handshakeTimeout: 10000,
+    perMessageDeflate: false
+  });
+  discordAiGateway = socket;
+
+  socket.on('message', function(raw) {
+    try {
+      const packet = JSON.parse(raw.toString());
+      if (packet.s != null) discordAiSequence = packet.s;
+
+      if (packet.op === 10) {
+        if (discordAiHeartbeatTimer) clearInterval(discordAiHeartbeatTimer);
+        discordAiHeartbeatTimer = setInterval(function() {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ op: 1, d: discordAiSequence }));
+          }
+        }, packet.d.heartbeat_interval);
+
+        socket.send(JSON.stringify({
+          op: 2,
+          d: {
+            token: DISCORD_BOT_TOKEN,
+            intents: 0,
+            properties: {
+              os: process.platform,
+              browser: '5heads-ai-manager',
+              device: '5heads-ai-manager'
+            }
+          }
+        }));
+        return;
+      }
+
+      if (packet.op === 1 && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ op: 1, d: discordAiSequence }));
+        return;
+      }
+
+      if (packet.op === 7 || packet.op === 9) {
+        try { socket.close(); } catch (_) {}
+        return;
+      }
+
+      if (packet.op === 0 && packet.t === 'READY') {
+        console.log('[DISCORD AI] Gateway connected as ' + (packet.d.user ? packet.d.user.username : 'bot'));
+      }
+
+      if (packet.op === 0 && packet.t === 'INTERACTION_CREATE') {
+        handleDiscordAiInteraction(packet.d);
+      }
+    } catch (e) {
+      console.error('[DISCORD AI] Gateway payload error:', e.message);
+    }
+  });
+
+  socket.on('close', function() {
+    if (discordAiHeartbeatTimer) {
+      clearInterval(discordAiHeartbeatTimer);
+      discordAiHeartbeatTimer = null;
+    }
+    if (discordAiGateway === socket) discordAiGateway = null;
+    scheduleDiscordAiReconnect();
+  });
+
+  socket.on('error', function(e) {
+    console.error('[DISCORD AI] Gateway error:', e.message);
+  });
+}
+
+async function startDiscordAiBot() {
+  if (!DISCORD_BOT_TOKEN) {
+    console.log('[DISCORD AI] DISCORD_BOT_TOKEN not set; Discord /ai is disabled.');
+    return;
+  }
+  try {
+    await registerDiscordAiCommand();
+    connectDiscordAiGateway();
+  } catch (e) {
+    console.error('[DISCORD AI] Startup failed:', e.message);
+    scheduleDiscordAiReconnect();
   }
 }
 
@@ -829,5 +1117,6 @@ function startHealthServer() {
 if (!validateConfig()) process.exit(1);
 console.log('5Heads Arena Bot started...');
 startHealthServer();
+startDiscordAiBot();
 loadHistoryFromGitHub();
 connect();
