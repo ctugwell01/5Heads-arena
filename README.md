@@ -176,7 +176,7 @@ The Rust-side bridge is versioned in GitHub at:
 
 Install `FiveHeadsAIBridge.cs` on the Rust server, copy the example config to `FiveHeadsAIBridge.json`, then set the real `API Secret` to the same value as Railway's `AI_BRIDGE_SECRET`. The real config filename is gitignored so the shared secret is not committed.
 
-Current Carbon bridge: **v1.0.1**. This build includes the Carbon compatibility fixes for `Oxide.Plugins.Timer`, the Unity/Oxide `Time` namespace collision, and encrypted `BasePlayer.userID` values.
+Current Carbon bridge: **v1.1.0**. This build includes the Carbon compatibility fixes for `Oxide.Plugins.Timer`, the Unity/Oxide `Time` namespace collision, and encrypted `BasePlayer.userID` values.
 
 Admin diagnostics:
 
@@ -186,3 +186,16 @@ Admin diagnostics:
 /aibridge flush
 /aibridge popup
 ```
+
+
+### Player and Discord AI questions
+
+Carbon bridge v1.1.0 adds a private in-game question command:
+
+```
+/ai <question>
+```
+
+The bridge sends an `ai_question` event to Railway. Railway answers against the latest heartbeat and returns the response through the allowlisted `send_player_message` action. The player command is read-only, rate-limited, and cannot execute admin actions.
+
+The Railway bot also supports a Discord `/ai question:<text>` slash command when `DISCORD_BOT_TOKEN` is configured. Discord answers are ephemeral by default. The same read-only policy applies.
