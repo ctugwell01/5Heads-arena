@@ -132,6 +132,9 @@ const SPAM_TIMERS = [10, 20, 1440];
 const SLUR_TIMERS = [10, 20, 1440];
 let ws;
 let counter = 1;
+const pendingRcon = new Map();
+let leaderboardCache = null;
+let leaderboardCacheAt = 0;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 let startupAnnouncementSent = false;
@@ -208,6 +211,39 @@ function sendRcon(command) {
     console.error('[RCON] Failed to send command:', e.message);
     return false;
   }
+}
+
+function requestRcon(command, timeoutMs) {
+  return new Promise(function(resolve, reject) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      reject(new Error('RCON is disconnected'));
+      return;
+    }
+    const id = counter++;
+    const key = String(id);
+    const timer = setTimeout(function() {
+      pendingRcon.delete(key);
+      reject(new Error('RCON request timed out'));
+    }, Math.max(1000, Number(timeoutMs || 5000)));
+    pendingRcon.set(key, { resolve: resolve, reject: reject, timer: timer });
+    try {
+      ws.send(JSON.stringify({ Identifier: id, Message: command, Name: 'Website' }));
+    } catch (e) {
+      clearTimeout(timer);
+      pendingRcon.delete(key);
+      reject(e);
+    }
+  });
+}
+
+function parseRconJson(raw) {
+  const text = String(raw || '').trim();
+  if (!text) throw new Error('Empty RCON response');
+  try { return JSON.parse(text); } catch (_) {}
+  const first = text.indexOf('{');
+  const last = text.lastIndexOf('}');
+  if (first >= 0 && last > first) return JSON.parse(text.slice(first, last + 1));
+  throw new Error('Leaderboard plugin did not return JSON');
 }
 
 function scheduleReconnect() {
@@ -694,6 +730,14 @@ function connect() {
   ws.on('message', async function(data) {
     try {
       const msg = JSON.parse(data.toString());
+      const pendingKey = msg && msg.Identifier !== undefined && msg.Identifier !== null ? String(msg.Identifier) : '';
+      if (pendingKey && pendingRcon.has(pendingKey)) {
+        const pending = pendingRcon.get(pendingKey);
+        pendingRcon.delete(pendingKey);
+        clearTimeout(pending.timer);
+        pending.resolve(String(msg.Message || ''));
+        return;
+      }
       if (msg.Type === 'Generic') {
         const manualEvent = parseManualPrisonEvent(msg.Message);
         if (manualEvent) {
@@ -1017,6 +1061,11 @@ if (text.startsWith('!block ')) {
   });
 
   ws.on('close', function(code, reasonBuffer) {
+    for (const [key, pending] of pendingRcon) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('RCON disconnected'));
+      pendingRcon.delete(key);
+    }
     ws = null;
     const reason = reasonBuffer ? reasonBuffer.toString() : '';
     console.error('[RCON] Disconnected. code=' + code + (reason ? ' reason=' + reason : ''));
@@ -1095,28 +1144,34 @@ function startHealthServer() {
       return;
     }
 
-    if (req.url === '/diagnostics/plugins') {
+    if (req.method === 'GET' && req.url === '/public/leaderboard') {
       try {
-        const eventFile = DATA_DIR + '/ai_bridge_events.ndjson';
-        const loaded = new Map();
-        if (fs.existsSync(eventFile)) {
-          const rows = fs.readFileSync(eventFile, 'utf8').trim().split('\n').filter(Boolean);
-          for (const row of rows.slice(-10000)) {
-            let ev; try { ev = JSON.parse(row); } catch { continue; }
-            const type = String(ev.event_type || '');
-            const name = ev.data && String(ev.data.plugin || '').trim();
-            if (!name) continue;
-            if (type === 'plugin_loaded') loaded.set(name, ev.data.version || null);
-            if (type === 'plugin_unloaded') loaded.delete(name);
-          }
+        if (leaderboardCache && Date.now() - leaderboardCacheAt < 15000) {
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.setHeader('Cache-Control', 'public, max-age=10');
+          res.statusCode = 200;
+          res.end(JSON.stringify(leaderboardCache));
+          return;
         }
-        res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Cache-Control', 'no-store');
+
+        const raw = await requestRcon('serverleaderboard.export', 6000);
+        const snapshot = parseRconJson(raw);
+        leaderboardCache = snapshot;
+        leaderboardCacheAt = Date.now();
+
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Cache-Control', 'public, max-age=10');
         res.statusCode = 200;
-        res.end(JSON.stringify({ plugins: Array.from(loaded.entries()).map(([name,version]) => ({name,version})) }));
+        res.end(JSON.stringify(snapshot));
       } catch (e) {
-        res.statusCode = 500;
-        res.end(JSON.stringify({ error: 'diagnostics_failed' }));
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        res.statusCode = 503;
+        res.end(JSON.stringify({
+          ok: false,
+          error: 'leaderboard_unavailable',
+          message: 'The live leaderboard plugin export is not available yet.'
+        }));
       }
       return;
     }
