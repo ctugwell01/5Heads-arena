@@ -1095,6 +1095,32 @@ function startHealthServer() {
       return;
     }
 
+    if (req.url === '/diagnostics/plugins') {
+      try {
+        const eventFile = DATA_DIR + '/ai_bridge_events.ndjson';
+        const loaded = new Map();
+        if (fs.existsSync(eventFile)) {
+          const rows = fs.readFileSync(eventFile, 'utf8').trim().split('\n').filter(Boolean);
+          for (const row of rows.slice(-10000)) {
+            let ev; try { ev = JSON.parse(row); } catch { continue; }
+            const type = String(ev.event_type || '');
+            const name = ev.data && String(ev.data.plugin || '').trim();
+            if (!name) continue;
+            if (type === 'plugin_loaded') loaded.set(name, ev.data.version || null);
+            if (type === 'plugin_unloaded') loaded.delete(name);
+          }
+        }
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Cache-Control', 'no-store');
+        res.statusCode = 200;
+        res.end(JSON.stringify({ plugins: Array.from(loaded.entries()).map(([name,version]) => ({name,version})) }));
+      } catch (e) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: 'diagnostics_failed' }));
+      }
+      return;
+    }
+
     if (req.url !== '/' && req.url !== '/health' && req.url !== '/ready') {
       res.statusCode = 404;
       res.end('Not found');
