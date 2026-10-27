@@ -721,18 +721,6 @@ function connect() {
   ws.on('open', function() {
     reconnectAttempts = 0;
     console.log('[RCON] Connected to Rust RCON');
-    setTimeout(async function() {
-      try {
-        const raw = await requestRcon('serverleaderboard.export', 6000);
-        const snapshot = parseRconJson(raw);
-        const playerCount = Array.isArray(snapshot && snapshot.players) ? snapshot.players.length : 0;
-        const aimCount = Array.isArray(snapshot && snapshot.aimTrain) ? snapshot.aimTrain.length : 0;
-        const parkourCount = Array.isArray(snapshot && snapshot.parkour) ? snapshot.parkour.length : 0;
-        console.log('[LEADERBOARD CHECK] export ok: ' + playerCount + ' PvP players, ' + aimCount + ' Aim Train rows, ' + parkourCount + ' Parkour rows');
-      } catch (e) {
-        console.error('[LEADERBOARD CHECK] export failed: ' + e.message);
-      }
-    }, 2500);
     if (!startupAnnouncementSent) {
       startupAnnouncementSent = true;
       setTimeout(function() { sendRcon('say [5Heads Arena Bot]: Loaded and monitoring chat.'); }, 2000);
