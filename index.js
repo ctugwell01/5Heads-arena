@@ -331,8 +331,6 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(function() {
     reconnectTimer = null;
     connect();
-setTimeout(function() { void pollVipAnnouncements(); }, 5000);
-setInterval(function() { void pollVipAnnouncements(); }, 5000);
   }, delay);
 }
 
@@ -1280,3 +1278,5 @@ startHealthServer();
 startDiscordAiBot();
 loadHistoryFromGitHub();
 connect();
+setTimeout(function() { void pollVipAnnouncements(); }, 5000);
+setInterval(function() { void pollVipAnnouncements(); }, 5000);
