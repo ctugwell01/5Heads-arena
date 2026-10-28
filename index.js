@@ -14,6 +14,8 @@ const DISCORD_VOICE_WEBHOOK = process.env.DISCORD_VOICE_WEBHOOK;
 const DISCORD_RECORDINGS_WEBHOOK = process.env.DISCORD_RECORDINGS_WEBHOOK;
 const DISCORD_PRISON_LOG_WEBHOOK = process.env.DISCORD_PRISON_LOG_WEBHOOK;
 const DISCORD_HISTORY_WEBHOOK = process.env.DISCORD_HISTORY_WEBHOOK;
+const VIP_ANNOUNCE_URL = process.env.VIP_ANNOUNCE_URL;
+const VIP_ANNOUNCE_SECRET = process.env.VIP_ANNOUNCE_SECRET;
 
 // The VIP channel sees only who was jailed and when; the private owner channel sees why.
 // A webhook targets its own Discord channel. Without webhooks, a bot token can post
@@ -246,6 +248,81 @@ function parseRconJson(raw) {
   throw new Error('Leaderboard plugin did not return JSON');
 }
 
+let vipPollBusy = false;
+const vipAnnouncedRefs = new Set();
+
+function cleanVipName(value) {
+  return String(value || '').replace(/[\r\n;"\\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 48);
+}
+
+async function resolveVipName(steamId) {
+  try {
+    let snapshot = leaderboardCache;
+    if (!snapshot || Date.now() - leaderboardCacheAt > 60000) {
+      const raw = await requestRcon('serverleaderboard.export', 6000);
+      snapshot = parseRconJson(raw);
+      leaderboardCache = snapshot;
+      leaderboardCacheAt = Date.now();
+    }
+    const all = [].concat(snapshot.players || [], snapshot.aimTrain || [], snapshot.parkour || []);
+    const row = all.find(function(x) { return String(x.userId || '') === String(steamId); });
+    const found = cleanVipName(row && row.name);
+    if (found) return found;
+  } catch (_) {}
+
+  try {
+    const rr = await fetch('https://steamcommunity.com/profiles/' + encodeURIComponent(String(steamId)) + '/?xml=1');
+    if (rr.ok) {
+      const xml = await rr.text();
+      const m = xml.match(/<steamID><!\[CDATA\[([\s\S]*?)\]\]><\/steamID>/i) || xml.match(/<steamID>([\s\S]*?)<\/steamID>/i);
+      const found = cleanVipName(m && m[1]);
+      if (found) return found;
+    }
+  } catch (_) {}
+
+  return 'A player';
+}
+
+async function ackVipAnnouncement(ref) {
+  const r = await fetch(VIP_ANNOUNCE_URL.replace(/\/$/, '') + '/ack', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + VIP_ANNOUNCE_SECRET, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ref: ref })
+  });
+  if (!r.ok) throw new Error('VIP announcement ack failed: ' + r.status);
+}
+
+async function pollVipAnnouncements() {
+  if (vipPollBusy || !VIP_ANNOUNCE_URL || !VIP_ANNOUNCE_SECRET || !ws || ws.readyState !== WebSocket.OPEN) return;
+  vipPollBusy = true;
+  try {
+    const r = await fetch(VIP_ANNOUNCE_URL.replace(/\/$/, '') + '/pending', {
+      headers: { 'Authorization': 'Bearer ' + VIP_ANNOUNCE_SECRET }
+    });
+    if (!r.ok) throw new Error('VIP announcement fetch failed: ' + r.status);
+    const data = await r.json();
+    const events = Array.isArray(data && data.events) ? data.events : [];
+    for (const event of events) {
+      const ref = String(event.ref || '');
+      if (!ref) continue;
+      if (vipAnnouncedRefs.has(ref)) {
+        try { await ackVipAnnouncement(ref); } catch (_) {}
+        continue;
+      }
+      const name = await resolveVipName(event.steam_id);
+      const message = '[VIP] ' + name + ' just became a BIG CHAD! Thank you so much for supporting 5Heads Arena! 💜';
+      if (sendRcon('say ' + message)) {
+        vipAnnouncedRefs.add(ref);
+        try { await ackVipAnnouncement(ref); } catch (e) { console.error('[VIP] Ack failed:', e.message); }
+      }
+    }
+  } catch (e) {
+    console.error('[VIP] Announcement poll failed:', e.message);
+  } finally {
+    vipPollBusy = false;
+  }
+}
+
 function scheduleReconnect() {
   if (reconnectTimer) return;
   const delay = Math.min(30000, 5000 * Math.pow(2, Math.min(reconnectAttempts, 3)));
@@ -254,6 +331,8 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(function() {
     reconnectTimer = null;
     connect();
+setTimeout(function() { void pollVipAnnouncements(); }, 5000);
+setInterval(function() { void pollVipAnnouncements(); }, 5000);
   }, delay);
 }
 
