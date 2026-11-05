@@ -310,7 +310,7 @@ async function pollVipAnnouncements() {
         continue;
       }
       const name = await resolveVipName(event.steam_id);
-      const message = '[VIP] ' + name + ' just became a BIG CHAD! Thank you so much for supporting 5Heads Arena! 💜';
+      const message = '<color=#FFD700><b>[VIP] ' + name.replace(/[<>]/g, '') + ' just became a BIG CHAD! Thank you so much for supporting 5Heads Arena! 💜</b></color>';
       if (sendRcon('say ' + message)) {
         vipAnnouncedRefs.add(ref);
         try { await ackVipAnnouncement(ref); } catch (e) { console.error('[VIP] Ack failed:', e.message); }
