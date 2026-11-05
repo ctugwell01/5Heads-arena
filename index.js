@@ -720,6 +720,12 @@ async function sendPrisonTestLogs() {
   console.log('[DISCORD TEST] Owner=' + entries[0] + ', VIP=' + entries[1]);
 }
 
+function requestVoicePrison(userId) {
+  // Voice punishment is owned by the Rust Prison plugin so every detector uses
+  // the same escalation ladder and duplicate jail requests are ignored there.
+  sendRcon('prison ' + userId + ' Voice chat slur detected');
+}
+
 async function prisonPlayer(userId, username, reason) {
   if (prisoned.has(userId)) return;
   prisoned.add(userId);
@@ -847,7 +853,7 @@ function connect() {
         console.log('[VOICE CHECK] text="' + voiceText + '" blocked=' + containsBlockedWord(voiceText) + ' prisoned=' + prisoned.has(voiceSteamId));
         if (prisoned.has(voiceSteamId)) return;
         if (containsBlockedWord(voiceText)) {
-          await prisonPlayer(voiceSteamId, voiceUsername, 'HateSpeech');
+          requestVoicePrison(voiceSteamId);
           if (DISCORD_RECORDINGS_WEBHOOK && global.pendingAudio && global.pendingAudio[voiceSteamId]) {
             try {
               const audioData = global.pendingAudio[voiceSteamId];
@@ -888,7 +894,7 @@ function connect() {
         const vSlur = await callAI('You are moderating a Rust game server voice chat. Speech-to-text software censors slurs by replacing them with similar sounding words. Does this transcript likely contain a racial slur, hate speech, or threat even if the slur was replaced by a similar word like nerd, bigger, digger, trigger, figure, sugar, mother, etc? Consider the full sentence context.' + getVoiceExamplePrompt() + ' Reply yes or no only. Message: "' + voiceText + '"', 5);
         addVoiceExample(voiceText, vSlur === 'yes');
         if (vSlur === 'yes') {
-          await prisonPlayer(voiceSteamId, voiceUsername, 'HateSpeech');
+          requestVoicePrison(voiceSteamId);
           if (DISCORD_VOICE_WEBHOOK) {
             await fetch(DISCORD_VOICE_WEBHOOK, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ embeds: [{ title: '🎙️ Voice Hate Speech Detected', color: 15158332, fields: [{ name: 'Player', value: voiceUsername, inline: true }, { name: 'Steam', value: 'https://steamcommunity.com/profiles/' + voiceSteamId, inline: true }, { name: 'Said', value: voiceText, inline: false }], timestamp: new Date().toISOString() }] }) }).catch(function(e) {});
           }
@@ -912,9 +918,9 @@ function connect() {
             body: JSON.stringify({ embeds: [{ title: '🎙️ Voice Hate Speech Detected', color: 15158332, fields: [{ name: 'Player', value: voiceUsername, inline: true }, { name: 'Steam', value: 'https://steamcommunity.com/profiles/' + voiceSteamId, inline: true }, { name: 'Said', value: voiceText, inline: false }], timestamp: new Date().toISOString() }] })
           }).catch(function(e) { console.error('Discord voice error:', e.message); });
         }
-        if (containsBlockedWord(voiceText)) { await prisonPlayer(voiceSteamId, voiceUsername, 'HateSpeech'); return; }
+        if (containsBlockedWord(voiceText)) { requestVoicePrison(voiceSteamId); return; }
         if (warnedPlayers.has(voiceSteamId)) {
-          await prisonPlayer(voiceSteamId, voiceUsername, 'HateSpeech');
+          requestVoicePrison(voiceSteamId);
           warnedPlayers.delete(voiceSteamId);
         } else {
           warnedPlayers.add(voiceSteamId);
