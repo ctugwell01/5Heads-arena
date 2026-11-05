@@ -180,6 +180,7 @@ namespace Oxide.Plugins
         private void OnServerInitialized()
         {
             LoadConfigValues();
+            MigrateAccidentalVoiceLifeSentences();
             SaveData();
             if (jailedUIDs.Count > 0) StartPositionTimer();
             timer.Every(120f, AutoYardTime);
@@ -613,7 +614,16 @@ namespace Oxide.Plugins
             }
             string reason = reasonParts.Count > 0 ? string.Join(" ", reasonParts) : "Rule Violation";
             BasePlayer target = FindPlayer((string)arg.Args[0]);
-            if (target != null) { JailPlayer(target, reason, overrideSeconds); return; }
+            if (target != null)
+            {
+                if (IsJailed(target))
+                {
+                    Puts($"[Prison] Duplicate RCON jail ignored for {target.displayName} ({target.userID}); existing sentence remains unchanged.");
+                    return;
+                }
+                JailPlayer(target, reason, overrideSeconds);
+                return;
+            }
             if (ulong.TryParse((string)arg.Args[0], out ulong offlineId))
             {
                 if (jailedPlayers.ContainsKey(offlineId)) return;
@@ -1783,6 +1793,7 @@ namespace Oxide.Plugins
             Config["Sentences", "Toxicity"]     = 20f;
             Config["Sentences", "Exploiting"]   = 180f;
             Config["Sentences", "Racism"]       = 5f;
+            Config["Sentences", "Voice chat slur detected"] = 2f;
             Config["Sentences", "Admin Jailed"] = 0f;
             Config["Sentences", "5Head Abuse"]  = 0f;
             Config["Sentences", "Default"]      = 0f;
@@ -1794,6 +1805,7 @@ namespace Oxide.Plugins
             Config["Escalation", "Racism"]     = new List<object> { 5f, 10f, 15f, 30f, 60f, 120f }; // progressive chances; max 2h
             Config["Escalation", "Toxicity"]   = new List<object> { 5f, 15f, 45f, 120f, 0f };  // 5m -> 15m -> 45m -> 2h -> permanent from the 5th
             Config["Escalation", "Exploiting"] = new List<object> { 30f, 120f, 360f, 0f };     // 30m -> 2h -> 6h -> permanent from the 4th
+            Config["Escalation", "Voice chat slur detected"] = new List<object> { 2f, 5f, 10f, 20f, 40f, 1440f, 0f }; // 2m -> 5m -> 10m -> 20m -> 40m -> 1d -> permanent
         }
 
         // adds any missing "Sentences" keys to an existing config on disk, so upgrading the
@@ -1805,6 +1817,7 @@ namespace Oxide.Plugins
                 ["Toxicity"]     = 20f,
                 ["Exploiting"]   = 180f,
                 ["Racism"]       = 5f,
+                ["Voice chat slur detected"] = 2f,
                 ["Admin Jailed"] = 0f,
                 ["5Head Abuse"]  = 0f,
                 ["Default"]      = 0f,
@@ -1857,6 +1870,11 @@ namespace Oxide.Plugins
                 Config["Escalation", "Exploiting"] = new List<object> { 30f, 120f, 360f, 0f };
                 changed = true;
             }
+            if (Config["Escalation", "Voice chat slur detected"] == null)
+            {
+                Config["Escalation", "Voice chat slur detected"] = new List<object> { 2f, 5f, 10f, 20f, 40f, 1440f, 0f };
+                changed = true;
+            }
             if (changed) SaveConfig();
         }
 
@@ -1891,6 +1909,29 @@ namespace Oxide.Plugins
         }
 
         private float GetConfigFloat(string category, string key) => Config[category, key] == null ? 0f : System.Convert.ToSingle(Config[category, key]);
+
+        private void MigrateAccidentalVoiceLifeSentences()
+        {
+            bool changed = false;
+            foreach (ulong uid in jailedPlayers.Keys.ToList())
+            {
+                if (!jailReasons.TryGetValue(uid, out string reason) ||
+                    !string.Equals(reason, "Voice chat slur detected", System.StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!jailDurations.TryGetValue(uid, out long duration) || duration <= 0)
+                {
+                    jailDurations[uid] = 120L;
+                    if (!jailStartTimes.ContainsKey(uid)) jailStartTimes[uid] = UnixNow();
+                    changed = true;
+                }
+            }
+
+            if (!changed) return;
+            SaveTimesData();
+            SaveDurationsData();
+            Puts("[Prison] Converted accidental permanent voice-chat sentences to the 2-minute first-offence sentence.");
+        }
 
         // sentences
 
