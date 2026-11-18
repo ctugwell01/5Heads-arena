@@ -671,13 +671,40 @@ async function processTriageQueue() {
     console.warn('[TRIAGE] Could not record feedback:', e.message);
   } finally { triageProcessing = false; }
 }
+// Accept the legacy misspelling to avoid silently sending feedback to owner logs.
+function configuredFeedbackWebhook() {
+  return process.env.ARENA_FEEDBACK_DIGEST_WEBHOOK || process.env.RENA_FEEDBACK_DIGEST_WEBHOOK;
+}
+async function testFeedbackDestination() {
+  if (!triageState || process.env.ARENA_FEEDBACK_TRIAGE === '0') return;
+  const webhook = configuredFeedbackWebhook();
+  if (!webhook) {
+    console.log('[TRIAGE] Dedicated feedback webhook not configured');
+    return;
+  }
+  const destination = require('crypto').createHash('sha256').update(webhook).digest('hex');
+  if (triageState.verifiedDestination === destination) return;
+  const delivered = await postPrisonLog('FEEDBACK CHANNEL TEST', webhook, DISCORD_OWNER_CHANNEL_ID, {
+    title: '5Heads Arena — Feedback channel connected',
+    description: 'Test notification: AI feedback reports will be delivered to this channel. No player report or prison action was generated.',
+    color: 3066993,
+    timestamp: new Date().toISOString()
+  });
+  if (delivered) {
+    try {
+      triageState.verifiedDestination = destination;
+      saveTriage();
+      console.log('[TRIAGE] Dedicated feedback webhook verified');
+    } catch (e) { console.warn('[TRIAGE] Could not save destination verification:', e.message); }
+  } else console.warn('[TRIAGE] Dedicated feedback webhook test failed');
+}
 async function sendTriageDigest(manual = false) {
   if (!triageState || process.env.ARENA_FEEDBACK_TRIAGE === '0' || triageDigestBusy) return false;
   const now = Date.now();
   const day = new Date(now).toISOString().slice(0,10);
   const hour = Number(process.env.ARENA_FEEDBACK_DIGEST_UTC_HOUR || 9);
   if (!manual && (new Date(now).getUTCHours() < (Number.isInteger(hour) && hour>=0 && hour<=23 ? hour : 9) || triageState.lastDigestDay === day)) return false;
-  const webhook = process.env.ARENA_FEEDBACK_DIGEST_WEBHOOK || DISCORD_OWNER_LOG_WEBHOOK;
+  const webhook = configuredFeedbackWebhook() || DISCORD_OWNER_LOG_WEBHOOK;
   const channel = process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID || DISCORD_OWNER_CHANNEL_ID;
   if (!webhook && !DISCORD_BOT_TOKEN) return false;
   triageDigestBusy = true;
@@ -713,10 +740,21 @@ async function sendTriageDigest(manual = false) {
 let lastManualTriageDigest = 0;
 async function handleTriageCommand(userId, text) {
   if (text.trim().toLowerCase() !== '!feedbackreport') return false;
-  if (!['76561199205214362','76561198337669548'].includes(String(userId))) return true;
-  if (Date.now()-lastManualTriageDigest<60000) return true;
+  const allowed = new Set(['76561199205214362','76561198337669548', ...String(process.env.ARENA_FEEDBACK_ADMIN_IDS || '').split(/[,\s]+/).filter(id => /^\d{17}$/.test(id))]);
+  const requester = String(userId);
+  if (!allowed.has(requester)) {
+    console.log('[TRIAGE] Feedback report denied: requester Steam ID ' + (/^\d{17}$/.test(requester) ? requester : 'invalid'));
+    return true;
+  }
+  if (Date.now()-lastManualTriageDigest<60000) {
+    console.log('[TRIAGE] Manual feedback report cooldown active');
+    return true;
+  }
   lastManualTriageDigest=Date.now();
-  await sendTriageDigest(true);
+  console.log('[TRIAGE] Admin requested manual feedback report');
+  const delivered = await sendTriageDigest(true);
+  console.log('[TRIAGE] Manual feedback report ' + (delivered ? 'delivered' : 'not delivered'));
+  if (delivered) sendRcon('say [5Heads Arena] Feedback report sent to Discord.');
   return true;
 }
 
@@ -1711,4 +1749,5 @@ function startArenaAnnouncements() {
 startArenaAnnouncements();
 setInterval(function() { void processTriageQueue(); }, 5000);
 setInterval(function() { void sendTriageDigest(); }, 60000);
+setTimeout(function() { void testFeedbackDestination(); }, 3000);
 
