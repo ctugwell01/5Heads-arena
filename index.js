@@ -1286,3 +1286,49 @@ loadHistoryFromGitHub();
 connect();
 setTimeout(function() { void pollVipAnnouncements(); }, 5000);
 setInterval(function() { void pollVipAnnouncements(); }, 5000);
+ 
+// Community reminders are independent of moderation and VIP announcements.
+// Railway: ARENA_ANNOUNCEMENT_INTERVAL_MINUTES=20 (0 disables),
+// ARENA_ANNOUNCEMENTS_JSON='["First message","Second message"]'.
+const defaultArenaAnnouncements = [
+  "Not enjoying a map or game mode? Let us know what you'd change in our Discord. Your feedback helps shape the server!",
+  "Competitive banter is welcome. Personal abuse is not. Respect other players and enjoy the arena.",
+  "Не нравится карта или режим? Оставьте свои предложения в Discord. Мы ценим ваше мнение!"
+];
+function startArenaAnnouncements() {
+  const rawInterval = process.env.ARENA_ANNOUNCEMENT_INTERVAL_MINUTES;
+  const minutes = rawInterval === undefined || rawInterval.trim() === '' ? 20 : Number(rawInterval);
+  if (minutes === 0) {
+    console.log('[ANNOUNCEMENTS] Disabled');
+    return;
+  }
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > 1440) {
+    console.warn('[ANNOUNCEMENTS] Invalid interval; announcements disabled (use 0 or 1-1440 minutes)');
+    return;
+  }
+  let messages = defaultArenaAnnouncements;
+  if (process.env.ARENA_ANNOUNCEMENTS_JSON) {
+    try {
+      const configured = JSON.parse(process.env.ARENA_ANNOUNCEMENTS_JSON);
+      if (!Array.isArray(configured) || !configured.length || configured.some(message =>
+        typeof message !== 'string' || !message.trim() || message.length > 220 ||
+        /[\x00-\x1f\x7f;"\\]/.test(message))) {
+        throw new Error('Expected a nonempty array of safe single-line messages (max 220 characters each)');
+      }
+      messages = configured.map(message => message.trim());
+    } catch (e) {
+      console.warn('[ANNOUNCEMENTS] Invalid custom messages; using defaults:', e.message);
+    }
+  }
+  let nextIndex = 0;
+  setInterval(function() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (sendRcon('say [5Heads Arena] ' + messages[nextIndex])) {
+      nextIndex = (nextIndex + 1) % messages.length;
+      console.log('[ANNOUNCEMENTS] Community reminder sent');
+    }
+  }, minutes * 60 * 1000);
+  console.log('[ANNOUNCEMENTS] Rotating ' + messages.length + ' messages every ' + minutes + ' minutes');
+}
+startArenaAnnouncements();
+
