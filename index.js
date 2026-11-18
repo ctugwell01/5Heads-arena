@@ -334,7 +334,50 @@ function scheduleReconnect() {
   }, delay);
 }
 
+// Use Groq as an optional alternative to Anthropic for chat classification.
+// Set GROQ_API_KEY on this service; no key is hardcoded or logged.
+let anthropicRetryAt = 0;
+async function callGroqClassifier(prompt, maxTokens) {
+  const key = process.env.GROQ_API_KEY;
+  if (!key) return 'none';
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+      signal: AbortSignal.timeout(12000),
+      body: JSON.stringify({
+        model: process.env.ARENA_GROQ_MODEL || 'openai/gpt-oss-120b',
+        max_completion_tokens: Math.max(512, maxTokens + 384),
+        reasoning_effort: 'low',
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    if (!res.ok) {
+      console.warn('[AI] Groq HTTP ' + res.status);
+      return 'none';
+    }
+    const data = await res.json();
+    const answer = data?.choices?.[0]?.message?.content;
+    if (typeof answer !== 'string' || !answer.trim()) {
+      console.warn('[AI] Groq empty response');
+      return 'none';
+    }
+    console.log('[AI] Groq classification succeeded');
+    return answer.trim().toLowerCase();
+  } catch (e) {
+    console.warn('[AI] Groq request failed');
+    return 'none';
+  }
+}
 async function callAI(prompt, maxTokens) {
+  if (process.env.ARENA_AI_PROVIDER === 'groq' || !ANTHROPIC_API_KEY || Date.now() < anthropicRetryAt) {
+    return callGroqClassifier(prompt, maxTokens);
+  }
+  const answer = await callAnthropicClassifier(prompt, maxTokens);
+  if (answer !== 'none' && answer !== '') return answer;
+  return process.env.GROQ_API_KEY ? callGroqClassifier(prompt, maxTokens) : answer;
+}
+async function callAnthropicClassifier(prompt, maxTokens) {
   if (!ANTHROPIC_API_KEY) return 'none';
   try {
     const controller = new AbortController();
@@ -357,6 +400,7 @@ async function callAI(prompt, maxTokens) {
         /permission|access/i.test(description) ? 'access issue' :
         'other invalid request (check Anthropic console)';
       console.warn('[AI] Diagnostic: ' + cause);
+      if (process.env.GROQ_API_KEY && [400, 401, 403, 429].includes(res.status)) anthropicRetryAt = Date.now() + 5 * 60 * 1000;
       return 'none';
     }
     if (!data.content || !data.content[0] || !data.content[0].text) { console.warn('[AI] Empty model response'); return 'none'; }
