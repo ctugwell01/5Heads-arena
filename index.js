@@ -349,6 +349,14 @@ async function callAI(prompt, maxTokens) {
     const data = await res.json();
     if (!res.ok) {
       console.warn('[AI] Anthropic HTTP ' + res.status + ' (' + String(data.error?.type || 'unknown').replace(/[^a-z_]/gi, '').slice(0, 60) + ')');
+      const description = String(data.error?.message || '');
+      const cause = /credit balance|insufficient credits|billing/i.test(description) ? 'billing or insufficient credits' :
+        /model.*(?:not found|invalid|not available|deprecated)/i.test(description) ? 'model unavailable' :
+        /max_tokens/i.test(description) ? 'max_tokens rejected' :
+        /api.key|authentication/i.test(description) ? 'authentication issue' :
+        /permission|access/i.test(description) ? 'access issue' :
+        'other invalid request (check Anthropic console)';
+      console.warn('[AI] Diagnostic: ' + cause);
       return 'none';
     }
     if (!data.content || !data.content[0] || !data.content[0].text) { console.warn('[AI] Empty model response'); return 'none'; }
@@ -536,7 +544,8 @@ async function maybeSendStaffAlert(userId, username, text) {
 }
 
 async function maybeAssistArenaPlayer(userId, username, text) {
-  if (/^(?:SERVER|5Heads Arena(?: Bot)?)$/i.test(String(username || '').trim())) return;
+  // Real Steam accounts may share the bot's display name.
+  if (!/^\d{17}$/.test(String(userId)) || /^\s*\[5Heads Arena(?: Bot)?\]/i.test(text)) return;
   void maybeSendStaffAlert(userId, username, text);
   if (await maybeReplyToArenaFaq(userId, username, text)) return;
   await maybeReplyToFeedback(userId, username, text);
