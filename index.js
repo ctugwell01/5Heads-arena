@@ -572,6 +572,7 @@ async function maybeSendStaffAlert(userId, username, text, classifiedReport) {
       fields: [
         { name: 'Player', value: safeStaffText(username, 80) || 'Unknown', inline: true },
         { name: 'Steam ID', value: id, inline: true },
+        { name: 'Player mode at report', value: report.currentMode && report.currentMode !== 'Unspecified' ? report.currentMode + ' (CoreLobby)' : 'Unavailable (not verified)' },
         { name: 'Original chat', value: original || '(empty)' },
         { name: 'English translation (AI)', value: safeStaffText(report.translation, 300) || '(unavailable)' }
       ],
@@ -628,6 +629,24 @@ function feedbackTarget(value) {
   return safeStaffText(typeof value === 'string' ? value : '',80) || 'Unspecified';
 }
 function feedbackIssueId(issue) { return String(issue.id).slice(0,8); }
+let feedbackModeLookupPauseUntil = 0;
+let feedbackModeLookups = 0;
+async function lookupFeedbackPlayerMode(userId) {
+  if (!/^\d{17}$/.test(String(userId)) || Date.now() < feedbackModeLookupPauseUntil || feedbackModeLookups >= 5 || !ws || ws.readyState !== WebSocket.OPEN) return null;
+  feedbackModeLookups++;
+  const started = Date.now();
+  try {
+    const raw = await requestRcon('fiveheads.feedbackmode ' + String(userId), 2500);
+    const data = parseRconJson(raw);
+    if (String(data.steam_id) !== String(userId) || !Number.isFinite(data.observed_at) || Math.abs(Date.now()-data.observed_at)>15000 || Date.now()-started>5000) throw new Error('Invalid mode response');
+    if (typeof data.mode !== 'string' || !data.mode.trim()) return null;
+    return feedbackMode(data.mode);
+  } catch (e) {
+    feedbackModeLookupPauseUntil = Date.now()+60000;
+    console.warn('[TRIAGE] Live mode lookup unavailable; check FiveHeadsFeedbackMode plugin');
+    return null;
+  } finally { feedbackModeLookups--; }
+}
 function enqueueTriage(userId, username, text, allowPublicReply = true) {
   if (process.env.ARENA_FEEDBACK_TRIAGE === '0' || !triageState || !process.env.GROQ_API_KEY) return false;
   if (typeof text !== 'string' || Array.from(text.trim()).length < 2 || /^[!\/]/.test(text.trim())) return false;
@@ -640,7 +659,8 @@ function enqueueTriage(userId, username, text, allowPublicReply = true) {
   if (triageRecent.has(key)) return true;
   if (triageQueue.length >= 30) return false;
   triageRecent.set(key, now + 5 * 60000);
-  triageQueue.push({ id, username, text: safe, at: now, allowPublicReply });
+  const modePromise = lookupFeedbackPlayerMode(id);
+  triageQueue.push({ id, username, text: safe, at: now, allowPublicReply, modePromise });
   console.log('[TRIAGE] Feedback queued');
   return true;
 }
@@ -724,7 +744,8 @@ async function notifyActionableIssue(issue, entry, translation) {
     description: 'AI-classified player feedback; not yet verified.',
     fields: [
       {name:'Category', value:issue.category, inline:true},
-      {name:'Mode / map', value:(issue.mode || 'Unspecified') + ' / ' + (issue.map || 'Unspecified'), inline:true},
+      {name:'Affected mode / map', value:(issue.mode || 'Unspecified') + ' / ' + (issue.map || 'Unspecified'), inline:true},
+      {name:'Player mode at report', value:entry.currentMode === 'Unspecified' || !entry.currentMode ? 'Unavailable (not verified)' : entry.currentMode + ' (CoreLobby)', inline:true},
       {name:'Issue / status', value:feedbackIssueId(issue) + ' / ' + (issue.status || 'open'), inline:true},
       {name:'Unique players (24h)',value:String(new Set(issue.reports.filter(r=>now-r.at<TRIAGE_DAY).map(r=>r.player)).size),inline:true},
       {name:'Original chat',value:entry.text || '(unavailable)'},
@@ -747,6 +768,8 @@ async function processTriageQueue() {
   triageProcessing = true;
   const entry = triageQueue.shift();
   try {
+    const currentMode = await entry.modePromise || 'Unspecified';
+    entry.currentMode = currentMode;
     const now = Date.now();
     pruneTriage(now);
     const recent = triageState.issues.slice().sort((a,b) => b.lastSeen-a.lastSeen).slice(0,40);
@@ -758,7 +781,7 @@ async function processTriageQueue() {
     if (data?.category === 'faq' || data?.category === 'admin') {
       const faq = data.category === 'faq';
       if (faq && (process.env.ARENA_FAQ_REPLIES === '0' || !Object.hasOwn(arenaFaqAnswers, data.faqKey))) return;
-      if (!faq) await maybeSendStaffAlert(entry.id, entry.username, entry.text, {type:'admin', translation: typeof data.translation === 'string' ? data.translation : entry.text});
+      if (!faq) await maybeSendStaffAlert(entry.id, entry.username, entry.text, {type:'admin', translation: typeof data.translation === 'string' ? data.translation : entry.text, currentMode});
       if (faq && entry.allowPublicReply !== false && process.env.ARENA_FAQ_REPLIES !== '0') {
         const now = Date.now();
         if ((faqCooldowns.get(entry.id) || 0) > now || now-faqLastReply<30000 || !ws || ws.readyState !== WebSocket.OPEN || prisoned.has(entry.id) || releaseCooldowns.has(entry.id)) return;
@@ -777,7 +800,8 @@ async function processTriageQueue() {
     if (!data || !triageCategories.includes(data.category) || !Object.hasOwn(triagePriorities,data.severity) || typeof data.title !== 'string' || typeof data.translation !== 'string' || typeof data.nextStep !== 'string') { console.warn('[TRIAGE] AI response failed schema validation'); return; }
     const category = data.category;
     const severity = ['general','positive'].includes(category) ? 'general' : data.severity === 'general' ? 'low' : data.severity;
-    const mode = feedbackMode(data.mode), map = feedbackTarget(data.map);
+    const mentionedMode = feedbackMode(data.mode), map = feedbackTarget(data.map);
+    const mode = mentionedMode === 'Unspecified' ? currentMode : mentionedMode;
     const title = safeStaffText(data.title, 100);
     if (!title) return;
     const sameTarget = i => i.category === category && (i.mode || 'Unspecified').toLowerCase() === mode.toLowerCase() && (i.map || 'Unspecified').toLowerCase() === map.toLowerCase();
@@ -803,7 +827,7 @@ async function processTriageQueue() {
     const repeated = issue.reports.some(report => report.player === player && now-report.at < TRIAGE_DAY && report.at >= (issue.statusAt || 0));
     issue.totalReports = (issue.totalReports || issue.reports.length) + 1;
     if (!repeated) {
-      issue.reports.push({player, at:entry.at, translation});
+      issue.reports.push({player, at:entry.at, translation, currentMode, mentionedMode});
       issue.reports = issue.reports.slice(-250);
     }
     saveTriage();
@@ -867,9 +891,9 @@ async function sendTriageDigest(manual = false) {
     if (!manual && !total) return false;
     const fields = actionable.slice(0,5).map(row=>({
       name: safeStaffText(row.issue.severity.toUpperCase() + ' | ' + row.issue.title, 180),
-      value: feedbackIssueId(row.issue) + ' | ' + (row.issue.status || 'open') + ' | ' + (row.issue.mode || 'Unspecified') + ' / ' + (row.issue.map || 'Unspecified') + '\n' + row.unique + ' unique player(s) in last 24h\nSuggested check: ' + (row.issue.nextStep || 'Reproduce and verify the reported issue') + '\nExample: ' + (row.reports.at(-1)?.translation || 'Not available')
+      value: feedbackIssueId(row.issue) + ' | ' + (row.issue.status || 'open') + ' | ' + (row.issue.mode || 'Unspecified') + ' / ' + (row.issue.map || 'Unspecified') + '\n' + row.unique + ' unique player(s) in last 24h\nSuggested check: ' + (row.issue.nextStep || 'Reproduce and verify the reported issue') + '\nPlayer mode at report: ' + (row.reports.at(-1)?.currentMode || 'Unspecified') + '\nExample: ' + (row.reports.at(-1)?.translation || 'Not available')
     }));
-    fields.push({name:'General complaints (not actionable)',value:String(general.reduce((sum,row)=>sum+row.reports.length,0)) + ' report(s)'});
+    fields.push({name:'General complaints (not actionable)',value:(String(general.reduce((sum,row)=>sum+row.reports.length,0)) + ' report(s)' + (general.length ? '\n'+general.slice(0,5).map(row=>(row.issue.mode||'Unspecified')+': '+row.issue.title+' ('+row.unique+' players)').join('\n') : '')).slice(0,1024)});
     if (actionable.length>5) fields.push({name:'Other actionable issues',value:String(actionable.length-5)});
     const modeCounts = new Map();
     for (const row of rows) {
