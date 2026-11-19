@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using Newtonsoft.Json;
 using Oxide.Core.Plugins;
 
 namespace Carbon.Plugins;
 
-[Info("FiveHeadsFeedbackMode", "5HeadNN", "1.0.2")]
+[Info("FiveHeadsFeedbackMode", "5HeadNN", "1.0.3")]
 [Description("Read-only server console lookup of a connected player's CoreLobby mode.")]
 public class FiveHeadsFeedbackMode : CarbonPlugin
 {
@@ -37,22 +38,32 @@ public class FiveHeadsFeedbackMode : CarbonPlugin
             else if (player == null) status = "player_not_online";
             else
             {
-                var direct = core.Call("GetPlayerGamemode", id) as string;
+                // CoreLobby 2.3.85 exposes public methods, not registered hooks.
+                var flags = BindingFlags.Public | BindingFlags.Instance;
+                var getMode = core.GetType().GetMethod("GetPlayerGamemode", flags, null, new[] { typeof(ulong) }, null);
+                var getAll = core.GetType().GetMethod("GetAllGamemodePlayers", flags, null, Type.EmptyTypes, null);
+                var direct = getMode != null ? getMode.Invoke(core, new object[] { id }) as string : core.Call("GetPlayerGamemode", id) as string;
                 if (!string.IsNullOrWhiteSpace(direct))
                 {
                     mode = direct;
-                    status = "direct";
+                    status = getMode != null ? "reflection_direct" : "hook_direct";
                 }
                 else
                 {
-                    var all = core.Call("GetAllGamemodePlayers") as IDictionary<ulong, string>;
+                    var all = (getAll != null ? getAll.Invoke(core, null) : core.Call("GetAllGamemodePlayers")) as IDictionary<ulong, string>;
                     if (all == null) status = "mode_api_unavailable";
                     else if (all.TryGetValue(id, out string tracked))
                     {
                         if (!string.IsNullOrWhiteSpace(tracked)) { mode = tracked; status = "tracked"; }
                         else status = "empty_mode";
                     }
-                    else { mode = "Lobby"; status = "not_in_tracked_mode"; }
+                    else
+                    {
+                        var inMode = core.GetType().GetMethod("IsPlayerInGamemode", flags, null, new[] { typeof(ulong) }, null);
+                        if (inMode != null && inMode.Invoke(core, new object[] { id }) is bool active && !active)
+                        { mode = "Lobby"; status = "not_in_tracked_mode"; }
+                        else status = "mode_not_tracked";
+                    }
                 }
             }
         }
