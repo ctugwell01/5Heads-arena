@@ -619,7 +619,7 @@ function pruneTriage(now) {
   triageState.issues = triageState.issues.filter(issue => now - issue.lastSeen < 30 * TRIAGE_DAY);
   for (const issue of triageState.issues) issue.reports = issue.reports.filter(report => now - report.at < 30 * TRIAGE_DAY);
 }
-function enqueueTriage(userId, username, text) {
+function enqueueTriage(userId, username, text, allowPublicReply = true) {
   if (process.env.ARENA_FEEDBACK_TRIAGE === '0' || !triageState || !process.env.GROQ_API_KEY) return false;
   if (typeof text !== 'string' || Array.from(text.trim()).length < 2 || /^[!\/]/.test(text.trim())) return false;
   if (!/\p{L}/u.test(text) || /^(?:gg|ggs|lol|lmao|ez|hi|hey|ok|yes|no|wp)[.! ]*$/iu.test(text.trim())) return false;
@@ -627,11 +627,11 @@ function enqueueTriage(userId, username, text) {
   const id = String(userId);
   const now = Date.now();
   for (const [key, expires] of triageRecent) if (expires <= now) triageRecent.delete(key);
-  const key = id + ':' + safe.toLowerCase();
+  const key = id + ':' + (allowPublicReply ? 'reply:' : 'silent:') + safe.toLowerCase();
   if (triageRecent.has(key)) return true;
   if (triageQueue.length >= 30) return false;
   triageRecent.set(key, now + 5 * 60000);
-  triageQueue.push({ id, username, text: safe, at: now });
+  triageQueue.push({ id, username, text: safe, at: now, allowPublicReply });
   console.log('[TRIAGE] Feedback queued');
   return true;
 }
@@ -663,6 +663,7 @@ function replyMatchesCurrentScript(source, reply) {
 }
 const contextualReplyTimes = new Map();
 function replyToTriagedIssue(entry, category, language, topic, saved, localizedReply) {
+  if (entry.allowPublicReply === false) return;
   if (process.env.ARENA_FEEDBACK_REPLIES === '0' || !ws || ws.readyState !== WebSocket.OPEN) return;
   if (prisoned.has(entry.id) || releaseCooldowns.has(entry.id)) return;
   const now = Date.now();
@@ -746,7 +747,7 @@ async function processTriageQueue() {
       const faq = data.category === 'faq';
       if (faq && (process.env.ARENA_FAQ_REPLIES === '0' || !Object.hasOwn(arenaFaqAnswers, data.faqKey))) return;
       if (!faq) await maybeSendStaffAlert(entry.id, entry.username, entry.text, {type:'admin', translation: typeof data.translation === 'string' ? data.translation : entry.text});
-      if (faq && process.env.ARENA_FAQ_REPLIES !== '0') {
+      if (faq && entry.allowPublicReply !== false && process.env.ARENA_FAQ_REPLIES !== '0') {
         const now = Date.now();
         if ((faqCooldowns.get(entry.id) || 0) > now || now-faqLastReply<30000 || !ws || ws.readyState !== WebSocket.OPEN || prisoned.has(entry.id) || releaseCooldowns.has(entry.id)) return;
         let reply = safeCommunityChat(data.reply, data.faqKey === 'leave');
@@ -887,12 +888,16 @@ async function maybeAssistArenaPlayer(userId, username, text) {
   if (!/^\d{17}$/.test(String(userId)) || typeof text !== 'string' || /^\s*(?:[!/]|[\[［]5Heads Arena(?: Bot)?[\]］])/i.test(text)) return;
   // Staff conversation is not an invitation to the community assistant.
   const staffIds = new Set(['76561199205214362','76561198337669548', ...String(process.env.ARENA_FEEDBACK_ADMIN_IDS || '').split(/[,\s]+/).filter(id => /^\d{17}$/.test(id))]);
-  if (staffIds.has(String(userId)) && !/^\s*(?:@?5heads\s+(?:ai|bot)|@?arena\s+bot)\b/i.test(text)) return;
-  const queued = enqueueTriage(userId, username, text);
+  const addressed = /^\s*(?:@?5heads\s+(?:ai|bot)|@?arena\s+bot)\b[\s,:-]*/i;
+  const allowPublicReply = !staffIds.has(String(userId)) || addressed.test(text);
+  const message = text.replace(addressed, '').trim();
+  if (!message || /^[!/]/.test(message)) return;
+  const queued = enqueueTriage(userId, username, message, allowPublicReply);
   if (queued) return;
-  void maybeSendStaffAlert(userId, username, text);
-  if (await maybeReplyToArenaFaq(userId, username, text)) return;
-  await maybeReplyToFeedback(userId, username, text);
+  void maybeSendStaffAlert(userId, username, message);
+  if (!allowPublicReply) return;
+  if (await maybeReplyToArenaFaq(userId, username, message)) return;
+  await maybeReplyToFeedback(userId, username, message);
 }
 
 function compactServerSnapshot(snapshot) {
