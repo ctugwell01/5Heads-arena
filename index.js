@@ -639,8 +639,14 @@ async function lookupFeedbackPlayerMode(userId) {
     const raw = await requestRcon('fiveheads.feedbackmode ' + String(userId), 2500);
     const data = parseRconJson(raw);
     if (String(data.steam_id) !== String(userId) || !Number.isFinite(data.observed_at) || Math.abs(Date.now()-data.observed_at)>15000 || Date.now()-started>5000) throw new Error('Invalid mode response');
-    if (typeof data.mode !== 'string' || !data.mode.trim()) return null;
-    return feedbackMode(data.mode);
+    if (typeof data.mode !== 'string' || !data.mode.trim()) {
+      const status = typeof data.status === 'string' && /^[a-zA-Z0-9_:]{1,80}$/.test(data.status) ? data.status : 'unknown';
+      console.warn('[TRIAGE] CoreLobby returned no player mode: ' + status);
+      return null;
+    }
+    const mode = feedbackMode(data.mode);
+    console.log('[TRIAGE] CoreLobby verified mode: ' + mode);
+    return mode;
   } catch (e) {
     feedbackModeLookupPauseUntil = Date.now()+60000;
     console.warn('[TRIAGE] Live mode lookup unavailable; check FiveHeadsFeedbackMode plugin');
