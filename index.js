@@ -808,7 +808,7 @@ async function testFeedbackDestination() {
   }
   const destination = require('crypto').createHash('sha256').update(webhook).digest('hex');
   if (triageState.verifiedDestination === destination) return;
-  const delivered = await postPrisonLog('FEEDBACK CHANNEL TEST', webhook, DISCORD_OWNER_CHANNEL_ID, {
+  const delivered = await postCommunityLog('FEEDBACK CHANNEL TEST', webhook, process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID, {
     title: '5Heads Arena — Feedback channel connected',
     description: 'Test notification: AI feedback reports will be delivered to this channel. No player report or prison action was generated.',
     color: 3066993,
