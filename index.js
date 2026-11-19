@@ -622,7 +622,7 @@ function pruneTriage(now) {
 }
 function feedbackMode(value) {
   const mode = String(value || '').trim().toLowerCase().replace(/[_-]/g,' ').replace(/\s+/g,' ');
-  const aliases = {'raid sim':'Raid Sim','raidsim':'Raid Sim','raid simulator':'Raid Sim','aim train':'Aim Train','aimtrain':'Aim Train','aim training':'Aim Train','gun game':'Gun Game','gungame':'Gun Game','mini games':'Minigames','minigames':'Minigames','lobby':'Lobby','corelobby':'Lobby','server wide':'Server-wide','server':'Server-wide'};
+  const aliases = {'akffa':'AK FFA','ak ffa':'AK FFA','ffa ak':'AK FFA','primitiveffa':'Primitive FFA','primitive ffa':'Primitive FFA','publicduels':'Public Duels','public duels':'Public Duels','fragisland':'Frag Island','frag island':'Frag Island','mazepvp':'Maze PvP','maze pvp':'Maze PvP','koth':'Hardpoint','hardpoint':'Hardpoint','parkour':'Parkour','parkourtracker':'Parkour','raidsimulator':'Raid Sim','raid sim':'Raid Sim','raidsim':'Raid Sim','raid simulator':'Raid Sim','aim train':'Aim Train','aimtrain':'Aim Train','aim training':'Aim Train','gun game':'Gun Game','gungame':'Gun Game','mini games':'Minigames','minigames':'Minigames','lobby':'Lobby','corelobby':'Lobby','server wide':'Server-wide','server':'Server-wide'};
   return Object.hasOwn(aliases,mode) ? aliases[mode] : safeStaffText(value || '',60) || 'Unspecified';
 }
 function feedbackTarget(value) {
