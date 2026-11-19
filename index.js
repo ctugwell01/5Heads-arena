@@ -543,9 +543,9 @@ function safeStaffText(value, limit) {
 }
 async function maybeSendStaffAlert(userId, username, text, classifiedReport) {
   if (process.env.ARENA_STAFF_ALERTS === '0') return;
-  const webhook = process.env.ARENA_STAFF_ALERT_WEBHOOK || DISCORD_OWNER_LOG_WEBHOOK;
-  const channel = process.env.ARENA_STAFF_ALERT_CHANNEL_ID || DISCORD_OWNER_CHANNEL_ID;
-  if (!webhook && !DISCORD_BOT_TOKEN) return;
+  const webhook = configuredFeedbackWebhook();
+  const channel = process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID;
+  if (!webhook && !(channel && DISCORD_BOT_TOKEN)) return;
   const id = String(userId);
   if (!/^\d{17}$/.test(id) || typeof text !== 'string' || text.length < 3 ||
       /^[!\/]/.test(text.trim()) || staffAlertBusy) return;
@@ -578,7 +578,7 @@ async function maybeSendStaffAlert(userId, username, text, classifiedReport) {
       footer: { text: 'Automatic chat detection • Staff review required' },
       timestamp: new Date().toISOString()
     };
-    const delivered = await postPrisonLog('STAFF ALERT', webhook, channel, embed);
+    const delivered = await postCommunityLog('STAFF ALERT', webhook, channel, embed);
     if (delivered) {
       staffAlertLastSent = Date.now();
       staffAlertCooldowns.set(id + ':' + report.type, staffAlertLastSent + 5 * 60 * 1000);
@@ -710,7 +710,7 @@ async function notifyActionableIssue(issue, entry, translation) {
   if (!webhook && !(channel && DISCORD_BOT_TOKEN)) return;
   const now = Date.now();
   if (issue.lastAlertAt && now - issue.lastAlertAt < 30 * 60000 && triagePriorities[issue.severity] <= (triagePriorities[issue.lastAlertSeverity] ?? -1)) return;
-  const delivered = await postPrisonLog('FEEDBACK ISSUE', webhook, channel || DISCORD_OWNER_CHANNEL_ID, {
+  const delivered = await postCommunityLog('FEEDBACK ISSUE', webhook, channel, {
     title: issue.severity.toUpperCase() + ' — ' + issue.title,
     description: 'AI-classified player feedback; not yet verified.',
     fields: [
@@ -790,7 +790,6 @@ async function processTriageQueue() {
     saveTriage();
     console.log('[TRIAGE] ' + (repeated ? 'Duplicate grouped ' : 'Recorded ') + category + ' / ' + severity);
     replyToTriagedIssue(entry, category, data.language, data.topic, true, data.reply);
-    if (category === 'bug') void maybeSendStaffAlert(entry.id, entry.username, entry.text, {type:'bug', translation: data.translation});
     await notifyActionableIssue(issue, entry, translation);
   } catch (e) {
     console.warn('[TRIAGE] Could not record feedback:', e.message);
@@ -829,9 +828,9 @@ async function sendTriageDigest(manual = false) {
   const day = new Date(now).toISOString().slice(0,10);
   const hour = Number(process.env.ARENA_FEEDBACK_DIGEST_UTC_HOUR || 9);
   if (!manual && (new Date(now).getUTCHours() < (Number.isInteger(hour) && hour>=0 && hour<=23 ? hour : 9) || triageState.lastDigestDay === day)) return false;
-  const webhook = configuredFeedbackWebhook() || DISCORD_OWNER_LOG_WEBHOOK;
-  const channel = process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID || DISCORD_OWNER_CHANNEL_ID;
-  if (!webhook && !DISCORD_BOT_TOKEN) return false;
+  const webhook = configuredFeedbackWebhook();
+  const channel = process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID;
+  if (!webhook && !(channel && DISCORD_BOT_TOKEN)) return false;
   triageDigestBusy = true;
   try {
     pruneTriage(now);
@@ -852,7 +851,7 @@ async function sendTriageDigest(manual = false) {
     }));
     fields.push({name:'General complaints (not actionable)',value:String(general.reduce((sum,row)=>sum+row.reports.length,0)) + ' report(s)'});
     if (actionable.length>8) fields.push({name:'Other actionable issues',value:String(actionable.length-8)});
-    const delivered = await postPrisonLog('FEEDBACK DIGEST',webhook,channel,{
+    const delivered = await postCommunityLog('FEEDBACK DIGEST',webhook,channel,{
       title:'5Heads Arena — Feedback priorities',
       description:total + ' deduplicated reports in the last 24h | ' + actionable.length + ' actionable issue(s).\nAI suggestions are unverified; staff decide what to fix.',
       fields, color:3447003, timestamp:new Date(now).toISOString()
@@ -1184,6 +1183,35 @@ async function startDiscordAiBot() {
   } catch (e) {
     console.error('[DISCORD AI] Startup failed:', e.message);
     scheduleDiscordAiReconnect();
+  }
+}
+
+// Community alerts use only the dedicated feedback destination, never moderation logs.
+async function postCommunityLog(label, webhook, channelId, embed) {
+  if (!webhook && !(channelId && DISCORD_BOT_TOKEN)) {
+    console.warn('[DISCORD] ' + label + ' feedback destination not configured');
+    return false;
+  }
+  if ((webhook && (webhook === DISCORD_OWNER_LOG_WEBHOOK || webhook === DISCORD_VIP_LOG_WEBHOOK)) ||
+      (!webhook && (channelId === DISCORD_OWNER_CHANNEL_ID || channelId === DISCORD_VIP_CHANNEL_ID))) {
+    console.warn('[DISCORD] ' + label + ' refused prison log destination');
+    return false;
+  }
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (!webhook) headers.Authorization = 'Bot ' + DISCORD_BOT_TOKEN;
+    const response = await fetch(webhook || 'https://discord.com/api/v10/channels/' + channelId + '/messages', {
+      method: 'POST', headers, body: JSON.stringify({embeds:[embed], allowed_mentions:{parse:[]}})
+    });
+    if (!response.ok) {
+      console.warn('[DISCORD] ' + label + ' feedback delivery failed, HTTP ' + response.status);
+      return false;
+    }
+    console.log('[DISCORD] ' + label + ' feedback delivered');
+    return true;
+  } catch (e) {
+    console.warn('[DISCORD] ' + label + ' feedback delivery error');
+    return false;
   }
 }
 
