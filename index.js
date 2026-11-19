@@ -23,6 +23,7 @@ const VIP_ANNOUNCE_SECRET = process.env.VIP_ANNOUNCE_SECRET;
 const DISCORD_VIP_LOG_WEBHOOK = process.env.DISCORD_VIP_LOG_WEBHOOK;
 const DISCORD_OWNER_LOG_WEBHOOK = process.env.DISCORD_OWNER_LOG_WEBHOOK;
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const FEEDBACK_BOT_TOKEN = process.env.ARENA_FEEDBACK_BOT_TOKEN;
 const DISCORD_VIP_CHANNEL_ID = process.env.DISCORD_VIP_CHANNEL_ID || '1558442485364293682';
 const DISCORD_OWNER_CHANNEL_ID = process.env.DISCORD_OWNER_CHANNEL_ID || '1558850603533213867';
 
@@ -767,7 +768,7 @@ function replyToTriagedIssue(entry, category, language, topic, saved, localizedR
   }
 }
 async function notifyActionableIssue(issue, entry, translation) {
-  if (['general','positive'].includes(issue.category) || process.env.ARENA_FEEDBACK_INSTANT_ALERTS === '0') return;
+  if (['general','positive'].includes(issue.category) || issue.status === 'dismissed' || process.env.ARENA_FEEDBACK_INSTANT_ALERTS === '0') return;
   const webhook = configuredFeedbackWebhook();
   const channel = process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID;
   if (!webhook && !(channel && DISCORD_BOT_TOKEN)) return;
@@ -789,7 +790,7 @@ async function notifyActionableIssue(issue, entry, translation) {
     ],
     color: issue.severity === 'critical' ? 15548997 : issue.severity === 'high' ? 16753920 : 3447003,
     timestamp:new Date(now).toISOString()
-  });
+  }, issue);
   if (delivered) {
     issue.regressionPending = false;
     issue.lastAlertAt = now;
@@ -925,7 +926,7 @@ async function sendTriageDigest(manual = false, weekly = false) {
       // Repeated reports break ties and add weight without promoting generic negativity.
       return {issue, reports, unique, score:rank*100 + Math.min(unique,20)*4};
     }).filter(row=>row.unique);
-    const actionable = rows.filter(row=>!['general','positive'].includes(row.issue.category) && row.issue.status!=='fixed').sort((a,b)=>b.score-a.score);
+    const actionable = rows.filter(row=>!['general','positive'].includes(row.issue.category) && !['fixed','dismissed'].includes(row.issue.status)).sort((a,b)=>b.score-a.score);
     const positive = rows.filter(row=>row.issue.category==='positive').sort((a,b)=>b.unique-a.unique);
     const general = rows.filter(row=>row.issue.category==='general');
     const total = rows.reduce((sum,row)=>sum+row.reports.length,0);
@@ -942,7 +943,7 @@ async function sendTriageDigest(manual = false, weekly = false) {
       if (!modeCounts.has(mode)) modeCounts.set(mode,{positive:new Set(),negative:new Set(),issues:0});
       const stats = modeCounts.get(mode);
       for (const report of row.reports) (row.issue.category==='positive' ? stats.positive : stats.negative).add(report.player);
-      if (!['positive','general'].includes(row.issue.category) && row.issue.status!=='fixed') stats.issues++;
+      if (!['positive','general'].includes(row.issue.category) && !['fixed','dismissed'].includes(row.issue.status)) stats.issues++;
     }
     const modes = [...modeCounts].sort((a,b)=>b[1].negative.size+b[1].positive.size-a[1].negative.size-a[1].positive.size).slice(0,8);
     if (modes.length) fields.push({name:'Game mode feedback (unique players per sentiment, not popularity rates)',value:modes.map(([mode,v])=>mode+': '+v.positive.size+' positive / '+v.negative.size+' other / '+v.issues+' active issues').join('\n').slice(0,1024)});
@@ -962,7 +963,7 @@ async function sendTriageDigest(manual = false, weekly = false) {
       if(features.length) fields.push({name:'Most requested features',value:features.map(r=>r.issue.title+' — '+r.unique+' players').join('\n').slice(0,600)});
     }
     const fixedCount = triageState.issues.filter(i=>i.status==='fixed').length;
-    fields.push({name:'Issue management',value:'Fixed issues retained: '+fixedCount+' | !feedbackstatus <ID> open/investigating/fixed | !feedbackissues'});
+    fields.push({name:'Issue management',value:'Fixed issues retained: '+fixedCount+' | !feedbackstatus <ID> open/investigating/fixed/dismissed | !feedbackissues'});
     const delivered = await postCommunityLog('FEEDBACK DIGEST',webhook,channel,{
       title:weekly?'5Heads Arena — Weekly development report':'5Heads Arena — Feedback priorities',
       description:total + ' deduplicated reports in the last ' + period + ' | ' + actionable.length + ' actionable issue(s).\nAI suggestions are unverified; staff decide what to fix.',
@@ -985,7 +986,7 @@ async function handleTriageCommand(userId, text) {
   }
   if (!triageState) return true;
   if (command.startsWith('!feedbackstatus')) {
-    const match = /^!feedbackstatus\s+([a-f0-9-]{8,36})\s+(open|investigating|fixed)$/.exec(command);
+    const match = /^!feedbackstatus\s+([a-f0-9-]{8,36})\s+(open|investigating|fixed|dismissed)$/.exec(command);
     if (!match) return true;
     const matches = triageState.issues.filter(i=>String(i.id).startsWith(match[1]) && !['positive','general'].includes(i.category));
     if (matches.length !== 1) return true;
@@ -1005,7 +1006,7 @@ async function handleTriageCommand(userId, text) {
   if (command === '!feedbackissues') {
     const issues = triageState.issues.filter(i=>!['positive','general'].includes(i.category)).sort((a,b)=>(a.status==='fixed')-(b.status==='fixed') || b.lastSeen-a.lastSeen);
     const shown = issues.slice(0,15);
-    await postCommunityLog('FEEDBACK REGISTER',configuredFeedbackWebhook(),process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID,{title:'5Heads Arena — Issue register',description:issues.length+' tracked issues; showing '+shown.length+'. Use !feedbackstatus <ID> open/investigating/fixed.',fields:shown.map(i=>({name:feedbackIssueId(i)+' | '+(i.status||'open'),value:(i.mode||'Unspecified')+' / '+(i.map||'Unspecified')+' | '+i.title})),color:3447003});
+    await postCommunityLog('FEEDBACK REGISTER',configuredFeedbackWebhook(),process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID,{title:'5Heads Arena — Issue register',description:issues.length+' tracked issues; showing '+shown.length+'. Use !feedbackstatus <ID> open/investigating/fixed/dismissed.',fields:shown.map(i=>({name:feedbackIssueId(i)+' | '+(i.status||'open'),value:(i.mode||'Unspecified')+' / '+(i.map||'Unspecified')+' | '+i.title})),color:3447003});
     return true;
   }
   const delivered = await sendTriageDigest(true, command === '!feedbackweekly');
@@ -1318,8 +1319,121 @@ async function startDiscordAiBot() {
   }
 }
 
+// Dedicated feedback bot: no moderation permissions or commands.
+const feedbackDiscordChannel = String(process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID || '');
+let feedbackDiscordUser = '';
+let feedbackDiscordVerified = false;
+let feedbackSocket = null, feedbackHeartbeat = null, feedbackReconnect = null, feedbackSeq = null;
+const feedbackStates = ['open','investigating','fixed','dismissed'];
+function feedbackButtons(issue) {
+  const status = issue.status || 'open';
+  const revision = Number(issue.statusAt || 0);
+  return [{type:1,components:[
+    ['investigating','Investigating',1],
+    ['fixed','Mark fixed',3],
+    ['dismissed','Dismiss',4],
+    ['open','Reopen',2]
+  ].map(([state,label,style])=>({type:2,style,label,custom_id:'arenaissue:'+issue.id+':'+state+':'+revision,disabled:state===status}))}];
+}
+async function verifyFeedbackDiscordChannel() {
+  const webhook = configuredFeedbackWebhook();
+  if (!FEEDBACK_BOT_TOKEN || !/^\d{17,22}$/.test(feedbackDiscordChannel) ||
+      feedbackDiscordChannel === DISCORD_OWNER_CHANNEL_ID || feedbackDiscordChannel === DISCORD_VIP_CHANNEL_ID ||
+      !webhook || webhook === DISCORD_OWNER_LOG_WEBHOOK || webhook === DISCORD_VIP_LOG_WEBHOOK) return false;
+  try {
+    const url = new URL(webhook);
+    if (url.protocol !== 'https:' || !['discord.com','discordapp.com'].includes(url.hostname) ||
+        !/^\/api(?:\/v\d+)?\/webhooks\/\d+\/[^/]+$/.test(url.pathname)) return false;
+    const wh = await fetch(url,{signal:AbortSignal.timeout(5000)});
+    if (!wh.ok || String((await wh.json()).channel_id)!==feedbackDiscordChannel) return false;
+    const response=await fetch('https://discord.com/api/v10/channels/'+feedbackDiscordChannel,{headers:{Authorization:'Bot '+FEEDBACK_BOT_TOKEN},signal:AbortSignal.timeout(5000)});
+    return response.ok && String((await response.json()).id)===feedbackDiscordChannel;
+  } catch (_) { return false; }
+}
+async function postFeedbackIssueWithButtons(issue, embed) {
+  if (!feedbackDiscordVerified || !feedbackDiscordUser) return false;
+  try {
+    const response=await fetch('https://discord.com/api/v10/channels/'+feedbackDiscordChannel+'/messages',{
+      method:'POST',headers:{Authorization:'Bot '+FEEDBACK_BOT_TOKEN,'Content-Type':'application/json'},
+      body:JSON.stringify({embeds:[embed],components:feedbackButtons(issue),allowed_mentions:{parse:[]}}),
+      signal:AbortSignal.timeout(8000)
+    });
+    if (!response.ok) { console.warn('[FEEDBACK BUTTONS] Bot delivery failed HTTP '+response.status+'; using existing webhook'); return false; }
+    console.log('[FEEDBACK BUTTONS] Issue delivered with controls');
+    return true;
+  } catch (_) { console.warn('[FEEDBACK BUTTONS] Bot delivery unavailable; using existing webhook'); return false; }
+}
+async function feedbackInteractionReply(i,type,data) {
+  const response=await fetch('https://discord.com/api/v10/interactions/'+i.id+'/'+i.token+'/callback',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,data}),signal:AbortSignal.timeout(5000)
+  });
+  if (!response.ok) console.warn('[FEEDBACK BUTTONS] Interaction response failed HTTP '+response.status);
+}
+async function handleFeedbackInteraction(i) {
+  if (!i || i.type!==3 || !String(i.data?.custom_id||'').startsWith('arenaissue:')) return;
+  const privateReply = content=>feedbackInteractionReply(i,4,{content,flags:64,allowed_mentions:{parse:[]}});
+  try {
+    if (!feedbackDiscordVerified || String(i.channel_id)!==feedbackDiscordChannel || !i.guild_id ||
+        String(i.message?.author?.id)!==feedbackDiscordUser || !i.member ||
+        !(BigInt(i.member.permissions||'0') & 8n)) {
+      return await privateReply('Only Discord administrators in the configured feedback channel can manage issues.');
+    }
+    const m=/^arenaissue:([a-f0-9-]{36}):(open|investigating|fixed|dismissed):(\d+)$/.exec(i.data.custom_id);
+    const issue=m && triageState?.issues.find(x=>x.id===m[1] && !['general','positive'].includes(x.category));
+    if (!issue) return await privateReply('This issue is no longer available.');
+    if (Number(m[3])!==Number(issue.statusAt||0)) {
+      const old=i.message.embeds?.[0];
+      if (!old) return await privateReply('Issue status has changed. Use a newer report.');
+      const embed={title:old.title,description:old.description,color:old.color,timestamp:old.timestamp,fields:(old.fields||[]).map(f=>f.name==='Issue / status'?{...f,value:feedbackIssueId(issue)+' / '+(issue.status||'open')}:f)};
+      return await feedbackInteractionReply(i,7,{embeds:[embed],components:feedbackButtons(issue),allowed_mentions:{parse:[]}});
+    }
+    const previous={status:issue.status,statusAt:issue.statusAt,regressionPending:issue.regressionPending};
+    issue.status=m[2]; issue.statusAt=Date.now(); issue.regressionPending=false;
+    try { saveTriage(); } catch (_) { Object.assign(issue,previous); return await privateReply('Could not save the issue. No changes made.'); }
+    const old=i.message.embeds?.[0];
+    console.log('[FEEDBACK BUTTONS] Issue '+feedbackIssueId(issue)+' changed to '+issue.status+' by Discord admin '+String(i.member.user?.id||'unknown'));
+    if (!old) return await privateReply('Issue updated to '+issue.status+'.');
+    const embed={title:old.title,description:old.description,color:old.color,timestamp:old.timestamp,fields:(old.fields||[]).map(f=>f.name==='Issue / status'?{...f,value:feedbackIssueId(issue)+' / '+issue.status}:f)};
+    await feedbackInteractionReply(i,7,{embeds:[embed],components:feedbackButtons(issue),allowed_mentions:{parse:[]}});
+  } catch (_) { console.warn('[FEEDBACK BUTTONS] Interaction error'); }
+}
+function connectFeedbackDiscord() {
+  if (!FEEDBACK_BOT_TOKEN || feedbackSocket) return;
+  const socket=new WebSocket('wss://gateway.discord.gg/?v=10&encoding=json',{handshakeTimeout:10000,perMessageDeflate:false});
+  feedbackSocket=socket; feedbackSeq=null;
+  function heartbeat(){if(socket.readyState===WebSocket.OPEN)socket.send(JSON.stringify({op:1,d:feedbackSeq}));}
+  socket.on('message',raw=>{
+    try {
+      const p=JSON.parse(raw.toString()); if(p.s!=null)feedbackSeq=p.s;
+      if(p.op===10){
+        clearInterval(feedbackHeartbeat); feedbackHeartbeat=setInterval(heartbeat,p.d.heartbeat_interval);
+        socket.send(JSON.stringify({op:2,d:{token:FEEDBACK_BOT_TOKEN,intents:0,properties:{os:process.platform,browser:'5heads-feedback',device:'5heads-feedback'}}}));
+      } else if(p.op===1)heartbeat();
+      else if(p.op===7||p.op===9)socket.close();
+      else if(p.op===0&&p.t==='READY'){
+        feedbackDiscordUser=String(p.d.user?.id||'');
+        void verifyFeedbackDiscordChannel().then(ok=>{if(feedbackSocket===socket){feedbackDiscordVerified=ok;console.log('[FEEDBACK BUTTONS] '+(ok?'Ready in verified feedback channel':'Channel verification failed; continuing webhook-only'));}});
+      } else if(p.op===0&&p.t==='INTERACTION_CREATE')void handleFeedbackInteraction(p.d);
+    } catch (_) { console.warn('[FEEDBACK BUTTONS] Gateway payload error'); }
+  });
+  socket.on('error',()=>console.warn('[FEEDBACK BUTTONS] Gateway connection error'));
+  socket.on('close',code=>{
+    if(feedbackSocket!==socket)return;
+    feedbackSocket=null; feedbackDiscordUser='';feedbackDiscordVerified=false;clearInterval(feedbackHeartbeat);
+    if([4004,4010,4011,4013,4014].includes(code)){console.warn('[FEEDBACK BUTTONS] Gateway rejected configuration');return;}
+    clearTimeout(feedbackReconnect);feedbackReconnect=setTimeout(connectFeedbackDiscord,10000);
+  });
+}
+function startFeedbackDiscord() {
+  if (!FEEDBACK_BOT_TOKEN || !feedbackDiscordChannel) {
+    console.log('[FEEDBACK BUTTONS] Disabled; configure ARENA_FEEDBACK_BOT_TOKEN and ARENA_FEEDBACK_DIGEST_CHANNEL_ID');
+    return;
+  }
+  connectFeedbackDiscord();
+}
+
 // Community alerts use only the dedicated feedback destination, never moderation logs.
-async function postCommunityLog(label, webhook, channelId, embed) {
+async function postCommunityLog(label, webhook, channelId, embed, issue = null) {
   if (!webhook && !(channelId && DISCORD_BOT_TOKEN)) {
     console.warn('[DISCORD] ' + label + ' feedback destination not configured');
     return false;
@@ -1330,6 +1444,7 @@ async function postCommunityLog(label, webhook, channelId, embed) {
     return false;
   }
   try {
+    if (issue && await postFeedbackIssueWithButtons(issue, embed)) return true;
     const headers = { 'Content-Type': 'application/json' };
     if (!webhook) headers.Authorization = 'Bot ' + DISCORD_BOT_TOKEN;
     const response = await fetch(webhook || 'https://discord.com/api/v10/channels/' + channelId + '/messages', {
@@ -2003,6 +2118,7 @@ if (!validateConfig()) process.exit(1);
 console.log('5Heads Arena Bot started...');
 startHealthServer();
 startDiscordAiBot();
+startFeedbackDiscord();
 loadHistoryFromGitHub();
 connect();
 setTimeout(function() { void pollVipAnnouncements(); }, 5000);
