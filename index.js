@@ -1549,10 +1549,18 @@ function connect() {
       console.log('[CHAT] ' + username + ': ' + text);
       if (await handleTriageCommand(userId, text)) return;
 
+      // Only the existing prison administrators can manage moderation rules.
+      // Community feedback permissions intentionally do not grant these privileges.
+      const moderationCommand = /^!(block|unblock|blocklist|voiceteach|history|testprisonlogs)(?=\s|$)/i.exec(text.trim());
+      if (moderationCommand && !['76561199205214362', '76561198337669548'].includes(String(userId))) {
+        console.warn('[MOD SECURITY] Denied unauthorized !' + moderationCommand[1].toLowerCase() + ' request');
+        return;
+      }
+
       if (text.startsWith('!voiceteach ')) {
         const parts = text.slice(12).trim().split(' ');
         const result = parts[0]; const phrase = parts.slice(1).join(' ');
-        if (!phrase || (result !== 'slur' && result !== 'clean')) { sendRcon('say [5Heads Arena Bot]: Usage: !voiceteach slur/clean <phrase>'); return; }
+        if (!phrase || phrase.length > 500 || /[\x00-\x1f\x7f;"\\]/.test(phrase) || (result !== 'slur' && result !== 'clean')) { sendRcon('say [5Heads Arena Bot]: Usage: !voiceteach slur/clean <phrase>'); return; }
         addVoiceExample(phrase, result === 'slur');
         sendRcon('say [5Heads Arena Bot]: Voice example saved — "' + phrase + '" marked as ' + result + '.'); return;
       }
@@ -1596,6 +1604,8 @@ function connect() {
       }
 if (text.startsWith('!block ')) {
         const word = text.slice(7).trim();
+        // Empty or command-like entries must never enter the substring blocklist.
+        if (!word || word.length > 120 || /[\x00-\x1f\x7f;"\\]/.test(word)) return;
         if (BLOCKED_WORDS.includes(word)) { sendRcon('say [5Heads Arena Bot]: "' + word + '" is already blocked!'); return; }
         BLOCKED_WORDS.push(word); saveBlockedWords();
         sendRcon('say [5Heads Arena Bot]: "' + word + '" added to blocklist.'); return;
