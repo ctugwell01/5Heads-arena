@@ -629,6 +629,34 @@ function feedbackTarget(value) {
   return safeStaffText(typeof value === 'string' ? value : '',80) || 'Unspecified';
 }
 function feedbackIssueId(issue) { return String(issue.id).slice(0,8); }
+const feedbackIncidents = [];
+function recordFeedbackIncident(kind) {
+  const now = Date.now();
+  feedbackIncidents.push({kind, at:now});
+  while (feedbackIncidents.length > 100 || (feedbackIncidents[0] && now-feedbackIncidents[0].at>3600000)) feedbackIncidents.shift();
+}
+function feedbackDiagnostics(data) {
+  const number = (v, min, max) => typeof v==='number' && Number.isFinite(v) && v>=min && v<=max ? v : null;
+  return {mode:typeof data.mode==='string' && data.mode.trim() ? feedbackMode(data.mode) : 'Unspecified',
+    map:feedbackTarget(data.map), online:number(data.online,0,10000), modePlayers:number(data.mode_players,0,10000),
+    ping:number(data.ping_ms,0,100000), fps:number(data.estimated_fps,0,10000),
+    x:number(data.cell_x,-100000,100000), z:number(data.cell_z,-100000,100000), observedAt:data.observed_at,
+    events:Array.isArray(data.events)?data.events.filter(e=>e && ['death','respawn','mode_join','mode_leave'].includes(e.kind) && Number.isFinite(e.at) && e.at<=data.observed_at && data.observed_at-e.at<=600000).slice(-8):[]};
+}
+function diagnosticFields(entry) {
+  const d=entry.diagnostics || {};
+  const fmt=(n,suffix='')=>Number.isFinite(n)?n+suffix:'Unavailable';
+  const events=(d.events||[]).map(e=>e.kind.replace('_',' ')+' — '+Math.max(0,Math.round((d.observedAt-e.at)/1000))+'s before snapshot');
+  const incidents=(entry.incidents||[]).map(e=>e.kind+' — '+Math.max(0,Math.round((entry.at-e.at)/1000))+'s before report');
+  return [
+    {name:'Reporter (private staff channel)', value:(safeStaffText(entry.username,80)||'Unknown')+' | '+entry.id},
+    {name:'Live map / arena', value:d.map && d.map!=='Unspecified'?d.map:'Unavailable (not verified)',inline:true},
+    {name:'Performance at report', value:'Ping: '+fmt(d.ping,' ms')+' | Estimated server FPS: '+fmt(d.fps)+' | Online: '+fmt(d.online)+' | Mode tracked: '+fmt(d.modePlayers)},
+    {name:'Recent gameplay (last 10 min)',value:events.join('\n')||'No events captured'},
+    {name:'Nearby server incidents (5 min; not proof of cause)',value:incidents.join('\n')||'None observed by bot'},
+    {name:'Location cell (25m, world X/Z)',value:Number.isFinite(d.x)&&Number.isFinite(d.z)?d.x+', '+d.z:'Unavailable',inline:true}
+  ];
+}
 let feedbackModeLookupPauseUntil = 0;
 let feedbackModeLookups = 0;
 async function lookupFeedbackPlayerMode(userId) {
@@ -642,11 +670,11 @@ async function lookupFeedbackPlayerMode(userId) {
     if (typeof data.mode !== 'string' || !data.mode.trim()) {
       const status = typeof data.status === 'string' && /^[a-zA-Z0-9_:]{1,80}$/.test(data.status) ? data.status : 'unknown';
       console.warn('[TRIAGE] CoreLobby returned no player mode: ' + status);
-      return null;
+      return feedbackDiagnostics(data);
     }
     const mode = feedbackMode(data.mode);
     console.log('[TRIAGE] CoreLobby verified mode: ' + mode);
-    return mode;
+    return feedbackDiagnostics(data);
   } catch (e) {
     feedbackModeLookupPauseUntil = Date.now()+60000;
     console.warn('[TRIAGE] Live mode lookup unavailable; check FiveHeadsFeedbackMode plugin');
@@ -666,7 +694,7 @@ function enqueueTriage(userId, username, text, allowPublicReply = true) {
   if (triageQueue.length >= 30) return false;
   triageRecent.set(key, now + 5 * 60000);
   const modePromise = lookupFeedbackPlayerMode(id);
-  triageQueue.push({ id, username, text: safe, at: now, allowPublicReply, modePromise });
+  triageQueue.push({ id, username, text: safe, at: now, allowPublicReply, modePromise, incidents:feedbackIncidents.filter(e=>now-e.at<=300000).slice(-5) });
   console.log('[TRIAGE] Feedback queued');
   return true;
 }
@@ -756,7 +784,8 @@ async function notifyActionableIssue(issue, entry, translation) {
       {name:'Unique players (24h)',value:String(new Set(issue.reports.filter(r=>now-r.at<TRIAGE_DAY).map(r=>r.player)).size),inline:true},
       {name:'Original chat',value:entry.text || '(unavailable)'},
       {name:'English translation',value:translation || '(unavailable)'},
-      {name:'Suggested check',value:issue.nextStep || 'Reproduce and verify the reported issue'}
+      {name:'Suggested check',value:issue.nextStep || 'Reproduce and verify the reported issue'},
+      ...diagnosticFields(entry)
     ],
     color: issue.severity === 'critical' ? 15548997 : issue.severity === 'high' ? 16753920 : 3447003,
     timestamp:new Date(now).toISOString()
@@ -774,7 +803,8 @@ async function processTriageQueue() {
   triageProcessing = true;
   const entry = triageQueue.shift();
   try {
-    const currentMode = await entry.modePromise || 'Unspecified';
+    entry.diagnostics = await entry.modePromise || {};
+    const currentMode = entry.diagnostics.mode || 'Unspecified';
     entry.currentMode = currentMode;
     const now = Date.now();
     pruneTriage(now);
@@ -806,8 +836,9 @@ async function processTriageQueue() {
     if (!data || !triageCategories.includes(data.category) || !Object.hasOwn(triagePriorities,data.severity) || typeof data.title !== 'string' || typeof data.translation !== 'string' || typeof data.nextStep !== 'string') { console.warn('[TRIAGE] AI response failed schema validation'); return; }
     const category = data.category;
     const severity = ['general','positive'].includes(category) ? 'general' : data.severity === 'general' ? 'low' : data.severity;
-    const mentionedMode = feedbackMode(data.mode), map = feedbackTarget(data.map);
+    const mentionedMode = feedbackMode(data.mode), mentionedMap = feedbackTarget(data.map);
     const mode = mentionedMode === 'Unspecified' ? currentMode : mentionedMode;
+    const map = mentionedMap !== 'Unspecified' ? mentionedMap : mode === currentMode ? entry.diagnostics.map || 'Unspecified' : 'Unspecified';
     const title = safeStaffText(data.title, 100);
     if (!title) return;
     const sameTarget = i => i.category === category && (i.mode || 'Unspecified').toLowerCase() === mode.toLowerCase() && (i.map || 'Unspecified').toLowerCase() === map.toLowerCase();
@@ -833,7 +864,7 @@ async function processTriageQueue() {
     const repeated = issue.reports.some(report => report.player === player && now-report.at < TRIAGE_DAY && report.at >= (issue.statusAt || 0));
     issue.totalReports = (issue.totalReports || issue.reports.length) + 1;
     if (!repeated) {
-      issue.reports.push({player, at:entry.at, translation, currentMode, mentionedMode});
+      issue.reports.push({player, at:entry.at, translation, currentMode, mentionedMode, diagnostics:entry.diagnostics, incidents:entry.incidents});
       issue.reports = issue.reports.slice(-250);
     }
     saveTriage();
@@ -871,12 +902,16 @@ async function testFeedbackDestination() {
     } catch (e) { console.warn('[TRIAGE] Could not save destination verification:', e.message); }
   } else console.warn('[TRIAGE] Dedicated feedback webhook test failed');
 }
-async function sendTriageDigest(manual = false) {
+async function sendTriageDigest(manual = false, weekly = false) {
   if (!triageState || process.env.ARENA_FEEDBACK_TRIAGE === '0' || triageDigestBusy) return false;
   const now = Date.now();
   const day = new Date(now).toISOString().slice(0,10);
   const hour = Number(process.env.ARENA_FEEDBACK_DIGEST_UTC_HOUR || 9);
-  if (!manual && (new Date(now).getUTCHours() < (Number.isInteger(hour) && hour>=0 && hour<=23 ? hour : 9) || triageState.lastDigestDay === day)) return false;
+  const windowMs = weekly ? 7*TRIAGE_DAY : TRIAGE_DAY;
+  const period = weekly ? '7 days' : '24h';
+  const lastKey = weekly ? 'lastWeeklyDay' : 'lastDigestDay';
+  if (weekly && !manual && new Date(now).getUTCDay() !== 1) return false;
+  if (!manual && (new Date(now).getUTCHours() < (Number.isInteger(hour) && hour>=0 && hour<=23 ? hour : 9) || triageState[lastKey] === day)) return false;
   const webhook = configuredFeedbackWebhook();
   const channel = process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID;
   if (!webhook && !(channel && DISCORD_BOT_TOKEN)) return false;
@@ -884,7 +919,7 @@ async function sendTriageDigest(manual = false) {
   try {
     pruneTriage(now);
     const rows = triageState.issues.map(issue => {
-      const reports = issue.reports.filter(report => now-report.at < TRIAGE_DAY);
+      const reports = issue.reports.filter(report => now-report.at < windowMs);
       const unique = new Set(reports.map(report=>report.player)).size;
       const rank = triagePriorities[issue.severity];
       // Repeated reports break ties and add weight without promoting generic negativity.
@@ -897,7 +932,7 @@ async function sendTriageDigest(manual = false) {
     if (!manual && !total) return false;
     const fields = actionable.slice(0,5).map(row=>({
       name: safeStaffText(row.issue.severity.toUpperCase() + ' | ' + row.issue.title, 180),
-      value: feedbackIssueId(row.issue) + ' | ' + (row.issue.status || 'open') + ' | ' + (row.issue.mode || 'Unspecified') + ' / ' + (row.issue.map || 'Unspecified') + '\n' + row.unique + ' unique player(s) in last 24h\nSuggested check: ' + (row.issue.nextStep || 'Reproduce and verify the reported issue') + '\nPlayer mode at report: ' + (row.reports.at(-1)?.currentMode || 'Unspecified') + '\nExample: ' + (row.reports.at(-1)?.translation || 'Not available')
+      value: feedbackIssueId(row.issue) + ' | ' + (row.issue.status || 'open') + ' | ' + (row.issue.mode || 'Unspecified') + ' / ' + (row.issue.map || 'Unspecified') + '\n' + row.unique + ' unique player(s) in last ' + period + '\nSuggested check: ' + (row.issue.nextStep || 'Reproduce and verify the reported issue') + '\nPlayer mode at report: ' + (row.reports.at(-1)?.currentMode || 'Unspecified') + '\nExample: ' + (row.reports.at(-1)?.translation || 'Not available')
     }));
     fields.push({name:'General complaints (not actionable)',value:(String(general.reduce((sum,row)=>sum+row.reports.length,0)) + ' report(s)' + (general.length ? '\n'+general.slice(0,5).map(row=>(row.issue.mode||'Unspecified')+': '+row.issue.title+' ('+row.unique+' players)').join('\n') : '')).slice(0,1024)});
     if (actionable.length>5) fields.push({name:'Other actionable issues',value:String(actionable.length-5)});
@@ -912,14 +947,28 @@ async function sendTriageDigest(manual = false) {
     const modes = [...modeCounts].sort((a,b)=>b[1].negative.size+b[1].positive.size-a[1].negative.size-a[1].positive.size).slice(0,8);
     if (modes.length) fields.push({name:'Game mode feedback (unique players per sentiment, not popularity rates)',value:modes.map(([mode,v])=>mode+': '+v.positive.size+' positive / '+v.negative.size+' other / '+v.issues+' active issues').join('\n').slice(0,1024)});
     if (positive.length) fields.push({name:'What players enjoy',value:positive.slice(0,4).map(row=>(row.issue.mode||'Unspecified')+' / '+(row.issue.map||'Unspecified')+': '+row.issue.title+' ('+row.unique+' players)').join('\n').slice(0,1024)});
+    if (weekly) {
+      const cells = new Map();
+      for (const row of rows.filter(r=>['bug','performance','map','balance'].includes(r.issue.category))) for (const report of row.reports) {
+        const d=report.diagnostics;
+        if (!d || !Number.isFinite(d.x) || !Number.isFinite(d.z) || !report.currentMode || report.currentMode==='Unspecified' || report.currentMode!==row.issue.mode) continue;
+        const key=report.currentMode+' / '+(d.map||'Unspecified')+' | X '+d.x+' Z '+d.z;
+        if (!cells.has(key)) cells.set(key,new Set());
+        cells.get(key).add(report.player);
+      }
+      const hotspots=[...cells].filter(([,players])=>players.size>=2).sort((a,b)=>b[1].size-a[1].size).slice(0,6);
+      fields.push({name:'Feedback hotspots (25m cells, 2+ reporters)',value:hotspots.map(([k,p])=>k+': '+p.size+' players').join('\n').slice(0,700)||'No repeated locations recorded'});
+      const features=rows.filter(r=>r.issue.category==='feature').sort((a,b)=>b.unique-a.unique).slice(0,4);
+      if(features.length) fields.push({name:'Most requested features',value:features.map(r=>r.issue.title+' — '+r.unique+' players').join('\n').slice(0,600)});
+    }
     const fixedCount = triageState.issues.filter(i=>i.status==='fixed').length;
     fields.push({name:'Issue management',value:'Fixed issues retained: '+fixedCount+' | !feedbackstatus <ID> open/investigating/fixed | !feedbackissues'});
     const delivered = await postCommunityLog('FEEDBACK DIGEST',webhook,channel,{
-      title:'5Heads Arena — Feedback priorities',
-      description:total + ' deduplicated reports in the last 24h | ' + actionable.length + ' actionable issue(s).\nAI suggestions are unverified; staff decide what to fix.',
-      fields, color:3447003, timestamp:new Date(now).toISOString()
+      title:weekly?'5Heads Arena — Weekly development report':'5Heads Arena — Feedback priorities',
+      description:total + ' deduplicated reports in the last ' + period + ' | ' + actionable.length + ' actionable issue(s).\nAI suggestions are unverified; staff decide what to fix.',
+      fields:fields.map(f=>({...f,value:String(f.value).slice(0,650)})).reduce((acc,f)=>{if(acc.reduce((sum,v)=>sum+v.name.length+v.value.length,0)+f.name.length+f.value.length<=5300)acc.push(f);return acc;},[]), color:3447003, timestamp:new Date(now).toISOString()
     });
-    if (delivered && !manual) { triageState.lastDigestDay=day; saveTriage(); }
+    if (delivered && !manual) { triageState[lastKey]=day; saveTriage(); }
     return delivered;
   } catch(e) { console.warn('[TRIAGE] Digest failed:',e.message); return false; }
   finally { triageDigestBusy=false; }
@@ -927,7 +976,7 @@ async function sendTriageDigest(manual = false) {
 let lastManualTriageDigest = 0;
 async function handleTriageCommand(userId, text) {
   const command = text.trim().toLowerCase();
-  if (!/^!feedback(?:report|issues|status)(?:\s|$)/.test(command)) return false;
+  if (!/^!feedback(?:report|issues|status|weekly)(?:\s|$)/.test(command)) return false;
   const allowed = new Set(['76561199205214362','76561198337669548', ...String(process.env.ARENA_FEEDBACK_ADMIN_IDS || '').split(/[,\s]+/).filter(id => /^\d{17}$/.test(id))]);
   const requester = String(userId);
   if (!allowed.has(requester)) {
@@ -959,7 +1008,7 @@ async function handleTriageCommand(userId, text) {
     await postCommunityLog('FEEDBACK REGISTER',configuredFeedbackWebhook(),process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID,{title:'5Heads Arena — Issue register',description:issues.length+' tracked issues; showing '+shown.length+'. Use !feedbackstatus <ID> open/investigating/fixed.',fields:shown.map(i=>({name:feedbackIssueId(i)+' | '+(i.status||'open'),value:(i.mode||'Unspecified')+' / '+(i.map||'Unspecified')+' | '+i.title})),color:3447003});
     return true;
   }
-  const delivered = await sendTriageDigest(true);
+  const delivered = await sendTriageDigest(true, command === '!feedbackweekly');
   console.log('[TRIAGE] Manual feedback report ' + (delivered ? 'delivered' : 'not delivered'));
   if (delivered) sendRcon('say [5Heads Arena] Feedback report sent to Discord.');
   return true;
@@ -1469,6 +1518,7 @@ function connect() {
   ws.on('message', async function(data) {
     try {
       const msg = JSON.parse(data.toString());
+      if (msg.Type === 'Generic' && typeof msg.Message === 'string' && /(?:Failed to call hook|Failed to compile|Exception while calling hook|NullReferenceException|server shutting down)/i.test(msg.Message)) recordFeedbackIncident('Plugin error or shutdown signal');
       const pendingKey = msg && msg.Identifier !== undefined && msg.Identifier !== null ? String(msg.Identifier) : '';
       if (pendingKey && pendingRcon.has(pendingKey)) {
         const pending = pendingRcon.get(pendingKey);
@@ -1814,6 +1864,7 @@ if (text.startsWith('!block ')) {
   });
 
   ws.on('close', function(code, reasonBuffer) {
+    recordFeedbackIncident('RCON disconnected');
     for (const [key, pending] of pendingRcon) {
       clearTimeout(pending.timer);
       pending.reject(new Error('RCON disconnected'));
@@ -2002,6 +2053,6 @@ function startArenaAnnouncements() {
 }
 startArenaAnnouncements();
 setInterval(function() { void processTriageQueue(); }, 5000);
-setInterval(function() { void sendTriageDigest(); }, 60000);
+setInterval(async function() { await sendTriageDigest(); await sendTriageDigest(false,true); }, 60000);
 setTimeout(function() { void testFeedbackDestination(); }, 3000);
 
