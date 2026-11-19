@@ -6,7 +6,7 @@ using Oxide.Core.Plugins;
 
 namespace Carbon.Plugins;
 
-[Info("FiveHeadsFeedbackMode", "5HeadNN", "1.0.1")]
+[Info("FiveHeadsFeedbackMode", "5HeadNN", "1.0.2")]
 [Description("Read-only server console lookup of a connected player's CoreLobby mode.")]
 public class FiveHeadsFeedbackMode : CarbonPlugin
 {
@@ -21,7 +21,7 @@ public class FiveHeadsFeedbackMode : CarbonPlugin
     private void FeedbackMode(ConsoleSystem.Arg arg)
     {
         if (arg == null) return;
-        if (arg.Connection != null && arg.Player()?.IsAdmin != true) return;
+        if (arg.Connection != null) return;
         if (arg.Args == null || arg.Args.Length != 1 || !ulong.TryParse(arg.Args[0], out ulong id))
         {
             arg.ReplyWith("Usage: fiveheads.feedbackmode <SteamID64>");
