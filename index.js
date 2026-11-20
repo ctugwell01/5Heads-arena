@@ -931,23 +931,46 @@ async function sendTriageDigest(manual = false, weekly = false) {
     const general = rows.filter(row=>row.issue.category==='general');
     const total = rows.reduce((sum,row)=>sum+row.reports.length,0);
     if (!manual && !total) return false;
-    const fields = actionable.slice(0,5).map(row=>({
-      name: safeStaffText(row.issue.severity.toUpperCase() + ' | ' + row.issue.title, 180),
-      value: feedbackIssueId(row.issue) + ' | ' + (row.issue.status || 'open') + ' | ' + (row.issue.mode || 'Unspecified') + ' / ' + (row.issue.map || 'Unspecified') + '\n' + row.unique + ' unique player(s) in last ' + period + '\nSuggested check: ' + (row.issue.nextStep || 'Reproduce and verify the reported issue') + '\nPlayer mode at report: ' + (row.reports.at(-1)?.currentMode || 'Unspecified') + '\nExample: ' + (row.reports.at(-1)?.translation || 'Not available')
-    }));
-    fields.push({name:'General complaints (not actionable)',value:(String(general.reduce((sum,row)=>sum+row.reports.length,0)) + ' report(s)' + (general.length ? '\n'+general.slice(0,5).map(row=>(row.issue.mode||'Unspecified')+': '+row.issue.title+' ('+row.unique+' players)').join('\n') : '')).slice(0,1024)});
-    if (actionable.length>5) fields.push({name:'Other actionable issues',value:String(actionable.length-5)});
-    const modeCounts = new Map();
-    for (const row of rows) {
-      const mode = row.issue.mode || 'Unspecified';
-      if (!modeCounts.has(mode)) modeCounts.set(mode,{positive:new Set(),negative:new Set(),issues:0});
-      const stats = modeCounts.get(mode);
-      for (const report of row.reports) (row.issue.category==='positive' ? stats.positive : stats.negative).add(report.player);
-      if (!['positive','general'].includes(row.issue.category) && !['fixed','dismissed'].includes(row.issue.status)) stats.issues++;
+    // Compact mobile-friendly digest. Keep technical diagnostics in individual alerts.
+    const location = issue => {
+      const mode = issue.mode && issue.mode !== 'Unspecified' ? issue.mode : 'Game mode unknown';
+      const map = issue.map && issue.map !== 'Unspecified' ? ' — '+issue.map : '';
+      return mode+map;
+    };
+    const playerLabel = n => n+' '+(n===1?'player':'players');
+    const statusLabel = status => ({open:'Open',investigating:'Investigating',fixed:'Fixed',dismissed:'Dismissed'}[status]||'Open');
+    const severityLabel = severity => ({critical:'🔴 Critical',high:'🟠 High',medium:'🟡 Medium',low:'⚪ Low',general:'General'}[severity]||'Unrated');
+    const groups = new Map();
+    for (const row of actionable) {
+      const key=row.issue.category+'|'+row.issue.title.trim().toLowerCase();
+      if(!groups.has(key))groups.set(key,[]);
+      groups.get(key).push(row);
     }
-    const modes = [...modeCounts].sort((a,b)=>b[1].negative.size+b[1].positive.size-a[1].negative.size-a[1].positive.size).slice(0,8);
-    if (modes.length) fields.push({name:'Game mode feedback (unique players per sentiment, not popularity rates)',value:modes.map(([mode,v])=>mode+': '+v.positive.size+' positive / '+v.negative.size+' other / '+v.issues+' active issues').join('\n').slice(0,1024)});
-    if (positive.length) fields.push({name:'What players enjoy',value:positive.slice(0,4).map(row=>(row.issue.mode||'Unspecified')+' / '+(row.issue.map||'Unspecified')+': '+row.issue.title+' ('+row.unique+' players)').join('\n').slice(0,1024)});
+    const ranked=[...groups.values()].sort((a,b)=>b[0].score-a[0].score);
+    const fields=[];
+    for(const group of ranked.slice(0,5)) {
+      const first=group[0];
+      const lines=group.slice(0,4).map(row=>'• '+location(row.issue)+' · '+playerLabel(row.unique)+' · '+statusLabel(row.issue.status)+' (\x60'+feedbackIssueId(row.issue)+'\x60)');
+      if(group.length>4)lines.push('+'+(group.length-4)+' more locations');
+      if(first.issue.nextStep)lines.push('**Check:** '+safeStaffText(first.issue.nextStep,180));
+      fields.push({name:severityLabel(first.issue.severity)+' — '+first.issue.title,value:lines.join('\n')});
+    }
+    if(!ranked.length)fields.push({name:'🛠️ Needs attention',value:'No new actionable reports in this period.'});
+    if(ranked.length>5)fields.push({name:'More issues',value:'+'+(ranked.length-5)+' issue types. Use !feedbackissues for the full register.'});
+    if(general.length)fields.push({name:'💬 General complaints',value:general.slice(0,3).map(row=>'• '+row.issue.title+' — '+location(row.issue)+' ('+playerLabel(row.unique)+')').join('\n')});
+    if(positive.length)fields.push({name:'💚 What players enjoyed',value:positive.slice(0,3).map(row=>'• '+row.issue.title+' — '+location(row.issue)+' ('+playerLabel(row.unique)+')').join('\n')});
+    else fields.push({name:'💚 What players enjoyed',value:'No specific praise recorded in this period.'});
+    if(weekly) {
+      const modeCounts=new Map();
+      for(const row of rows) {
+        const mode=row.issue.mode||'Unspecified';
+        if(mode==='Unspecified')continue;
+        if(!modeCounts.has(mode))modeCounts.set(mode,{p:new Set(),n:new Set()});
+        const counts=modeCounts.get(mode);
+        for(const report of row.reports)(row.issue.category==='positive'?counts.p:counts.n).add(report.player);
+      }
+      if(modeCounts.size)fields.push({name:'Game mode feedback',value:[...modeCounts].sort((a,b)=>b[1].n.size-a[1].n.size).slice(0,6).map(([mode,c])=>mode+': '+c.p.size+' praise / '+c.n.size+' other').join('\n')});
+    }
     if (weekly) {
       const cells = new Map();
       for (const row of rows.filter(r=>['bug','performance','map','balance'].includes(r.issue.category))) for (const report of row.reports) {
@@ -962,12 +985,14 @@ async function sendTriageDigest(manual = false, weekly = false) {
       const features=rows.filter(r=>r.issue.category==='feature').sort((a,b)=>b.unique-a.unique).slice(0,4);
       if(features.length) fields.push({name:'Most requested features',value:features.map(r=>r.issue.title+' — '+r.unique+' players').join('\n').slice(0,600)});
     }
-    const fixedCount = triageState.issues.filter(i=>i.status==='fixed').length;
-    fields.push({name:'Issue management',value:'Fixed issues retained: '+fixedCount+' | !feedbackstatus <ID> open/investigating/fixed/dismissed | !feedbackissues'});
+    const reporters=new Set(rows.flatMap(row=>row.reports.map(report=>report.player))).size;
+    const fixedThisPeriod=triageState.issues.filter(i=>i.status==='fixed'&&i.statusAt&&now-i.statusAt<windowMs).length;
     const delivered = await postCommunityLog('FEEDBACK DIGEST',webhook,channel,{
-      title:weekly?'5Heads Arena — Weekly development report':'5Heads Arena — Feedback priorities',
-      description:total + ' deduplicated reports in the last ' + period + ' | ' + actionable.length + ' actionable issue(s).\nAI suggestions are unverified; staff decide what to fix.',
-      fields:fields.map(f=>({...f,value:String(f.value).slice(0,650)})).reduce((acc,f)=>{if(acc.reduce((sum,v)=>sum+v.name.length+v.value.length,0)+f.name.length+f.value.length<=5300)acc.push(f);return acc;},[]), color:3447003, timestamp:new Date(now).toISOString()
+      title:weekly?'📋 Weekly development summary':'📋 Daily feedback summary',
+      description:playerLabel(reporters)+' gave feedback in the last '+period+'.\n**'+ranked.length+' issue types to review** · '+fixedThisPeriod+' marked fixed\nReports are player claims, not confirmed bugs.',
+      fields:fields.map(f=>({...f,value:String(f.value).slice(0,900)})).reduce((acc,f)=>{if(acc.reduce((sum,v)=>sum+v.name.length+v.value.length,0)+f.name.length+f.value.length<=5300)acc.push(f);return acc;},[]),
+      footer:{text:'Full issue list: !feedbackissues | Details in individual alerts'},
+      color:3447003,timestamp:new Date(now).toISOString()
     });
     if (delivered && !manual) { triageState[lastKey]=day; saveTriage(); }
     return delivered;
