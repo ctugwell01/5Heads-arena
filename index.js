@@ -1748,7 +1748,7 @@ function connect() {
         return;
       }
       if (msg.Type === 'Generic' && typeof msg.Message === 'string' && msg.Message.includes('[5HEADS_TERRAIN] ')) {
-        const payload=msg.Message.slice(msg.Message.indexOf('[5HEADS_TERRAIN] ')+18).trim();
+        const payload=msg.Message.slice(msg.Message.indexOf('[5HEADS_TERRAIN] ')+('[5HEADS_TERRAIN] '.length)).trim();
         void handleTerrainDeathEvent(payload).catch(e=>console.warn('[TERRAIN] Alert error:',e.message));
         return;
       }
