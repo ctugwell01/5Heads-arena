@@ -8,7 +8,7 @@ using Oxide.Core.Plugins;
 
 namespace Carbon.Plugins;
 
-[Info("FiveHeadsFeedbackMode", "5HeadNN", "1.1.0")]
+[Info("FiveHeadsFeedbackMode", "5HeadNN", "1.2.0")]
 [Description("Read-only server console lookup of a connected player's CoreLobby mode.")]
 public class FiveHeadsFeedbackMode : CarbonPlugin
 {
@@ -19,6 +19,9 @@ public class FiveHeadsFeedbackMode : CarbonPlugin
         Puts("Feedback mode lookup ready. Console command: fiveheads.feedbackmode <SteamID64>");
     }
 
+    // Only observe suspicious deaths; never change player state or call Kill().
+    private readonly Dictionary<ulong, long> lastTerrainEvent = new();
+    private readonly Dictionary<ulong, string> lastKnownMode = new();
     private readonly Dictionary<ulong, List<GameEvent>> history = new();
     private class GameEvent
     {
@@ -33,10 +36,71 @@ public class FiveHeadsFeedbackMode : CarbonPlugin
         list.Add(new GameEvent { kind = kind, at = now });
         if (list.Count > 8) list.RemoveAt(0);
     }
-    private void OnPlayerDeath(BasePlayer player, HitInfo info) { if (player != null) Record((ulong)player.userID, "death"); }
+    private string CurrentPlayerMode(ulong id)
+    {
+        try
+        {
+            var core = CoreLobby ?? plugins.Find("CoreLobby");
+            if (core == null) return null;
+            var flags = BindingFlags.Public | BindingFlags.Instance;
+            var method = core.GetType().GetMethod("GetPlayerGamemode", flags, null, new[] { typeof(ulong) }, null);
+            var direct = method != null ? method.Invoke(core, new object[] { id }) as string : core.Call("GetPlayerGamemode", id) as string;
+            if (!string.IsNullOrWhiteSpace(direct)) return direct;
+            var allMethod = core.GetType().GetMethod("GetAllGamemodePlayers", flags, null, Type.EmptyTypes, null);
+            var modes = (allMethod != null ? allMethod.Invoke(core, null) : core.Call("GetAllGamemodePlayers")) as IDictionary<ulong,string>;
+            if (modes != null && modes.TryGetValue(id, out string tracked) && !string.IsNullOrWhiteSpace(tracked)) return tracked;
+        }
+        catch { }
+        return null;
+    }
+    private void OnPlayerDeath(BasePlayer player, HitInfo info)
+    {
+        if (player == null) return;
+        ulong id = (ulong)player.userID;
+        Record(id, "death");
+        try
+        {
+            var position = player.transform.position;
+            if (!float.IsFinite(position.x) || !float.IsFinite(position.y) || !float.IsFinite(position.z)) return;
+            var heightMap = TerrainMeta.HeightMap;
+            if (heightMap == null) return;
+            float terrainHeight = heightMap.GetHeight(position);
+            if (!float.IsFinite(terrainHeight) || terrainHeight - position.y < 15f) return;
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (lastTerrainEvent.TryGetValue(id, out long prior) && now-prior < 5000) return;
+            lastTerrainEvent[id] = now;
+            string mode = CurrentPlayerMode(id);
+            if (!string.IsNullOrWhiteSpace(mode)) lastKnownMode[id] = mode;
+            else lastKnownMode.TryGetValue(id, out mode);
+            string map = !string.IsNullOrWhiteSpace(mode) ? ReadSingleArenaName(mode) : null;
+            Puts("[5HEADS_TERRAIN] " + JsonConvert.SerializeObject(new {
+                event_type = "terrain_death", steam_id = id.ToString(),
+                player = player.displayName, mode = mode,
+                mode_verified = !string.IsNullOrWhiteSpace(mode),
+                map = map, x = Math.Round(position.x,2), y = Math.Round(position.y,2),
+                z = Math.Round(position.z,2), terrain_y = Math.Round(terrainHeight,2),
+                at = now
+            }));
+        }
+        catch (Exception e) { PrintWarning("Terrain event capture failed: " + e.GetType().Name); }
+    }
     private void OnPlayerRespawned(BasePlayer player) { if (player != null) Record((ulong)player.userID, "respawn"); }
-    private void OnCoreLobbyGamemodeStateChanged(ulong id, bool inGamemode) { Record(id, inGamemode ? "mode_join" : "mode_leave"); }
-    private void OnPlayerDisconnected(BasePlayer player, string reason) { if (player != null) history.Remove((ulong)player.userID); }
+    private void OnCoreLobbyGamemodeStateChanged(ulong id, bool inGamemode)
+    {
+        Record(id, inGamemode ? "mode_join" : "mode_leave");
+        if (inGamemode) {
+            var mode = CurrentPlayerMode(id);
+            if (!string.IsNullOrWhiteSpace(mode)) lastKnownMode[id] = mode;
+        } else lastKnownMode.Remove(id);
+    }
+    private void OnPlayerDisconnected(BasePlayer player, string reason)
+    {
+        if (player == null) return;
+        var id = (ulong)player.userID;
+        history.Remove(id);
+        lastKnownMode.Remove(id);
+        lastTerrainEvent.Remove(id);
+    }
     private string ReadSingleArenaName(string mode)
     {
         // CoreLobby 2.3.85 confirms these two modes use a single Arena config.
