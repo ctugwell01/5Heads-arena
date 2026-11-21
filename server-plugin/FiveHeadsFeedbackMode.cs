@@ -61,11 +61,11 @@ public class FiveHeadsFeedbackMode : CarbonPlugin
         try
         {
             var position = player.transform.position;
-            if (!float.IsFinite(position.x) || !float.IsFinite(position.y) || !float.IsFinite(position.z)) return;
+            if (float.IsNaN(position.x) || float.IsInfinity(position.x) || float.IsNaN(position.y) || float.IsInfinity(position.y) || float.IsNaN(position.z) || float.IsInfinity(position.z)) return;
             var heightMap = TerrainMeta.HeightMap;
             if (heightMap == null) return;
             float terrainHeight = heightMap.GetHeight(position);
-            if (!float.IsFinite(terrainHeight) || terrainHeight - position.y < 15f) return;
+            if (float.IsNaN(terrainHeight) || float.IsInfinity(terrainHeight) || terrainHeight - position.y < 15f) return;
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (lastTerrainEvent.TryGetValue(id, out long prior) && now-prior < 5000) return;
             lastTerrainEvent[id] = now;
