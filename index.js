@@ -637,6 +637,51 @@ function feedbackTarget(value) {
 }
 function feedbackIssueId(issue) { return String(issue.id).slice(0,8); }
 const feedbackIncidents = [];
+// Server-side terrain-death telemetry from FiveHeadsFeedbackMode v1.2+.
+// It is an observation, not a punishment, and is never used to modify game state.
+const terrainDeathGroups = new Map();
+async function handleTerrainDeathEvent(raw) {
+  if (process.env.ARENA_TERRAIN_ALERTS === '0') return;
+  let event;
+  try { event = JSON.parse(raw); } catch (_) { return; }
+  if (event?.event_type !== 'terrain_death' || !/^\d{17}$/.test(String(event.steam_id))) return;
+  const numbers=['x','y','z','terrain_y','at'];
+  if (numbers.some(k=>typeof event[k] !== 'number' || !Number.isFinite(event[k]))) return;
+  if (event.at > Date.now()+30000 || Date.now()-event.at>120000 || event.terrain_y-event.y<15) return;
+  const name=safeStaffText(event.player,70)||'Unknown player';
+  const mode=typeof event.mode==='string' && event.mode.trim() ? feedbackMode(event.mode) : 'Unverified';
+  const map=event.map && typeof event.map==='string' ? feedbackTarget(event.map) : 'Unverified';
+  const now=Date.now();
+  for (const [key,item] of terrainDeathGroups) if (now-item.last>600000) terrainDeathGroups.delete(key);
+  const key=event.steam_id+'|'+mode;
+  let group=terrainDeathGroups.get(key);
+  if (!group || now-group.last>600000) group={count:0,first:now,last:now,lastAlert:0,lastAlertCount:0};
+  // The plugin suppresses duplicate deaths within five seconds; keep additional RCON protection.
+  const fingerprint=[event.steam_id,event.at,event.x,event.y,event.z].join(':');
+  if (group.fingerprint===fingerprint) return;
+  group.fingerprint=fingerprint; group.count++; group.last=now;
+  terrainDeathGroups.set(key,group);
+  recordFeedbackIncident('Player died deep below terrain');
+  console.warn('[TERRAIN] '+name+' mode='+mode+' observed deaths='+group.count);
+  if (group.lastAlert && now-group.lastAlert<300000) return;
+  const webhook=configuredFeedbackWebhook(), channel=process.env.ARENA_FEEDBACK_DIGEST_CHANNEL_ID;
+  if (!webhook && !(channel && DISCORD_BOT_TOKEN)) return;
+  const position='X '+event.x.toFixed(2)+' / Y '+event.y.toFixed(2)+' / Z '+event.z.toFixed(2);
+  const delivered=await postCommunityLog('TERRAIN DEATH',webhook,channel,{
+    title:group.count>=3?'🔴 Repeated terrain deaths':'⚠️ Player died below terrain',
+    description:'Detected by Rust server plugin. Cause not established; investigate spawn and teleport destinations.',
+    fields:[
+      {name:'Player',value:name+' ('+event.steam_id+')'},
+      {name:'Game mode at death',value:mode==='Unverified'?'Unknown (not verified)':mode+' (CoreLobby)',inline:true},
+      {name:'Map / arena',value:map,inline:true},
+      {name:'Deaths detected (last 10 min)',value:String(group.count),inline:true},
+      {name:'Position',value:position},
+      {name:'Terrain height / distance below',value:event.terrain_y.toFixed(2)+' / '+(event.terrain_y-event.y).toFixed(2)+' metres'},
+      {name:'First detected',value:new Date(group.first).toISOString()}
+    ],color:group.count>=3?15548997:16753920,timestamp:new Date(event.at).toISOString()
+  });
+  if (delivered) {group.lastAlert=Date.now();group.lastAlertCount=group.count;console.log('[TERRAIN] Feedback-channel alert delivered');}
+}
 function recordFeedbackIncident(kind) {
   const now = Date.now();
   feedbackIncidents.push({kind, at:now});
@@ -1700,6 +1745,11 @@ function connect() {
         pendingRcon.delete(pendingKey);
         clearTimeout(pending.timer);
         pending.resolve(String(msg.Message || ''));
+        return;
+      }
+      if (msg.Type === 'Generic' && typeof msg.Message === 'string' && msg.Message.includes('[5HEADS_TERRAIN] ')) {
+        const payload=msg.Message.slice(msg.Message.indexOf('[5HEADS_TERRAIN] ')+18).trim();
+        void handleTerrainDeathEvent(payload).catch(e=>console.warn('[TERRAIN] Alert error:',e.message));
         return;
       }
       if (msg.Type === 'Generic') {
