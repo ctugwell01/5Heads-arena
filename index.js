@@ -623,6 +623,22 @@ function saveTriage() {
   fs.writeFileSync(TRIAGE_FILE + '.tmp', JSON.stringify(triageState), { mode: 0o600 });
   fs.renameSync(TRIAGE_FILE + '.tmp', TRIAGE_FILE);
 }
+// One-time owner-requested clean slate, 23 Nov 2026. Preserve a local backup.
+const FEEDBACK_RESET_ID = '2026-11-23-clean-slate-v1';
+if (triageState && triageState.resetId !== FEEDBACK_RESET_ID) {
+  try {
+    const backupPath = DATA_DIR + '/community-feedback-before-2026-11-23-reset.json';
+    if (!fs.existsSync(backupPath)) fs.writeFileSync(backupPath, JSON.stringify(triageState), {mode:0o600, flag:'wx'});
+    const previous = triageState;
+    const today = new Date().toISOString().slice(0,10);
+    triageState = {...previous, issues:[], lastDigestDay:today, lastWeeklyDay:today, resetId:FEEDBACK_RESET_ID};
+    try { saveTriage(); }
+    catch (e) { triageState=previous; throw e; }
+    console.log('[TRIAGE] One-time feedback register reset complete; previous reports backed up locally.');
+  } catch (e) {
+    console.warn('[TRIAGE] Feedback register reset failed, keeping previous reports:',e.message);
+  }
+}
 function pruneTriage(now) {
   triageState.issues = triageState.issues.filter(issue => (issue.status && issue.status !== 'open' && issue.category !== 'positive') || now - issue.lastSeen < 30 * TRIAGE_DAY);
   for (const issue of triageState.issues) issue.reports = issue.reports.filter(report => now - report.at < 30 * TRIAGE_DAY);
@@ -997,67 +1013,59 @@ async function sendTriageDigest(manual = false, weekly = false) {
     const general = rows.filter(row=>row.issue.category==='general');
     const total = rows.reduce((sum,row)=>sum+row.reports.length,0);
     if (!manual && !total) return false;
-    // Compact mobile-friendly digest. Keep technical diagnostics in individual alerts.
-    const location = issue => {
-      const mode = issue.mode && issue.mode !== 'Unspecified' ? issue.mode : 'Game mode unknown';
-      const map = issue.map && issue.map !== 'Unspecified' ? ' — '+issue.map : '';
-      return mode+map;
-    };
+    // Keep the Discord digest short and avoid inaccurate mode attribution.
     const playerLabel = n => n+' '+(n===1?'player':'players');
-    const statusLabel = status => ({open:'Open',investigating:'Investigating',fixed:'Fixed',dismissed:'Dismissed'}[status]||'Open');
-    const severityLabel = severity => ({critical:'🔴 Critical',high:'🟠 High',medium:'🟡 Medium',low:'⚪ Low',general:'General'}[severity]||'Unrated');
-    const groups = new Map();
-    for (const row of actionable) {
+    const modeMention = issue => {
+      if (issue.mode && issue.mode !== 'Unspecified') return issue.mode;
+      const text = String(issue.title || '').toLowerCase();
+      const modes = [
+        [/raid\\s*sim|raid\\s*simulator/, 'Raid Sim'],
+        [/aim\\s*train/, 'Aim Train'],
+        [/ak\\s*ffa/, 'AK FFA'],
+        [/frag\\s*island/, 'Frag Island'],
+        [/public\\s*duels?/, 'Public Duels'],
+        [/primitive\\s*ffa/, 'Primitive FFA'],
+        [/gun\\s*game/, 'Gun Game'],
+        [/hardpoint|\\bkoth\\b/, 'Hardpoint'],
+        [/parkour/, 'Parkour']
+      ];
+      const found = modes.find(([regex])=>regex.test(text));
+      return found ? found[1]+' (mentioned, not verified)' : '';
+    };
+    const severityLabel = severity => ({critical:'🔴 Critical',high:'🟠 High',medium:'🟡 Medium',low:'⚪ Low'}[severity]||'⚪');
+    const groups=new Map();
+    for(const row of actionable) {
       const key=row.issue.category+'|'+row.issue.title.trim().toLowerCase();
       if(!groups.has(key))groups.set(key,[]);
       groups.get(key).push(row);
     }
-    const ranked=[...groups.values()].sort((a,b)=>b[0].score-a[0].score);
+    const ranked=[...groups.values()].sort((a,b)=>b.reduce((sum,r)=>sum+r.unique,0)-a.reduce((sum,r)=>sum+r.unique,0) || (triagePriorities[b[0].issue.severity]||0)-(triagePriorities[a[0].issue.severity]||0));
     const fields=[];
-    for(const group of ranked.slice(0,5)) {
-      const first=group[0];
-      const lines=group.slice(0,4).map(row=>'• '+location(row.issue)+' · '+playerLabel(row.unique)+' · '+statusLabel(row.issue.status)+' (\x60'+feedbackIssueId(row.issue)+'\x60)');
-      if(group.length>4)lines.push('+'+(group.length-4)+' more locations');
-      if(first.issue.nextStep)lines.push('**Check:** '+safeStaffText(first.issue.nextStep,180));
-      fields.push({name:severityLabel(first.issue.severity)+' — '+first.issue.title,value:lines.join('\n')});
+    for(const group of ranked.slice(0,3)) {
+      const issue=group[0].issue;
+      const combined=new Set(group.flatMap(row=>row.reports.map(report=>report.player))).size;
+      const locations=[...new Set(group.map(row=>modeMention(row.issue)).filter(Boolean))].slice(0,2);
+      const example=group.flatMap(row=>row.reports).sort((a,b)=>b.at-a.at)[0];
+      const details=[
+        playerLabel(combined)+' reported this · '+(issue.status==='investigating'?'Investigating':'Needs review'),
+        locations.length ? 'Mode: '+locations.join(', ') : 'Mode: not confirmed',
+        example?.translation ? 'Player said: '+safeStaffText(example.translation,140) : '',
+        issue.nextStep ? 'Next step: '+safeStaffText(issue.nextStep,130) : ''
+      ].filter(Boolean);
+      fields.push({name:severityLabel(issue.severity)+' '+safeStaffText(issue.title,100),value:details.join('\n')});
     }
-    if(!ranked.length)fields.push({name:'🛠️ Needs attention',value:'No new actionable reports in this period.'});
-    if(ranked.length>5)fields.push({name:'More issues',value:'+'+(ranked.length-5)+' issue types. Use !feedbackissues for the full register.'});
-    if(general.length)fields.push({name:'💬 General complaints',value:general.slice(0,3).map(row=>'• '+row.issue.title+' — '+location(row.issue)+' ('+playerLabel(row.unique)+')').join('\n')});
-    if(positive.length)fields.push({name:'💚 What players enjoyed',value:positive.slice(0,3).map(row=>'• '+row.issue.title+' — '+location(row.issue)+' ('+playerLabel(row.unique)+')').join('\n')});
-    else fields.push({name:'💚 What players enjoyed',value:'No specific praise recorded in this period.'});
-    if(weekly) {
-      const modeCounts=new Map();
-      for(const row of rows) {
-        const mode=row.issue.mode||'Unspecified';
-        if(mode==='Unspecified')continue;
-        if(!modeCounts.has(mode))modeCounts.set(mode,{p:new Set(),n:new Set()});
-        const counts=modeCounts.get(mode);
-        for(const report of row.reports)(row.issue.category==='positive'?counts.p:counts.n).add(report.player);
-      }
-      if(modeCounts.size)fields.push({name:'Game mode feedback',value:[...modeCounts].sort((a,b)=>b[1].n.size-a[1].n.size).slice(0,6).map(([mode,c])=>mode+': '+c.p.size+' praise / '+c.n.size+' other').join('\n')});
-    }
-    if (weekly) {
-      const cells = new Map();
-      for (const row of rows.filter(r=>['bug','performance','map','balance'].includes(r.issue.category))) for (const report of row.reports) {
-        const d=report.diagnostics;
-        if (!d || !Number.isFinite(d.x) || !Number.isFinite(d.z) || !report.currentMode || report.currentMode==='Unspecified' || report.currentMode!==row.issue.mode) continue;
-        const key=report.currentMode+' / '+(d.map||'Unspecified')+' | X '+d.x+' Z '+d.z;
-        if (!cells.has(key)) cells.set(key,new Set());
-        cells.get(key).add(report.player);
-      }
-      const hotspots=[...cells].filter(([,players])=>players.size>=2).sort((a,b)=>b[1].size-a[1].size).slice(0,6);
-      fields.push({name:'Feedback hotspots (25m cells, 2+ reporters)',value:hotspots.map(([k,p])=>k+': '+p.size+' players').join('\n').slice(0,700)||'No repeated locations recorded'});
-      const features=rows.filter(r=>r.issue.category==='feature').sort((a,b)=>b.unique-a.unique).slice(0,4);
-      if(features.length) fields.push({name:'Most requested features',value:features.map(r=>r.issue.title+' — '+r.unique+' players').join('\n').slice(0,600)});
-    }
+    if(ranked.length>3)fields.push({name:'Other reports',value:(ranked.length-3)+' more issue types are in the full register. Use !feedbackissues.'});
+    if(general.length)fields.push({name:'General suggestions and complaints',value:general.slice(0,2).map(r=>safeStaffText(r.issue.title,100)+' ('+playerLabel(r.unique)+')').join('\n')});
+    if(positive.length)fields.push({name:'What players liked',value:positive.slice(0,2).map(r=>safeStaffText(r.issue.title,100)+' ('+playerLabel(r.unique)+')').join('\n')});
+    if(!fields.length)fields.push({name:'No new reports to review',value:'Feedback collection is active.'});
     const reporters=new Set(rows.flatMap(row=>row.reports.map(report=>report.player))).size;
-    const fixedThisPeriod=triageState.issues.filter(i=>i.status==='fixed'&&i.statusAt&&now-i.statusAt<windowMs).length;
     const delivered = await postCommunityLog('FEEDBACK DIGEST',webhook,channel,{
-      title:weekly?'📋 Weekly development summary':'📋 Daily feedback summary',
-      description:playerLabel(reporters)+' gave feedback in the last '+period+'.\n**'+ranked.length+' issue types to review** · '+fixedThisPeriod+' marked fixed\nReports are player claims, not confirmed bugs.',
-      fields:fields.map(f=>({...f,value:String(f.value).slice(0,900)})).reduce((acc,f)=>{if(acc.reduce((sum,v)=>sum+v.name.length+v.value.length,0)+f.name.length+f.value.length<=5300)acc.push(f);return acc;},[]),
-      footer:{text:'Full issue list: !feedbackissues | Details in individual alerts'},
+      title:weekly?'📋 Weekly player feedback':'📋 Daily player feedback',
+      description:playerLabel(reporters)+' shared feedback in the last '+period+'. '+
+        (ranked.length ? ranked.length+' types of issues or requests were recorded.' : 'No outstanding issues were reported.')+
+        '\nReports are unverified; review before making changes.',
+      fields:fields.slice(0,6).map(f=>({...f,value:String(f.value).slice(0,900)})),
+      footer:{text:'Details & issue IDs: !feedbackissues · Feedback reset 23 Nov 2026'},
       color:3447003,timestamp:new Date(now).toISOString()
     });
     if (delivered && !manual) { triageState[lastKey]=day; saveTriage(); }
