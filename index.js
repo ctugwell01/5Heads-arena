@@ -1019,14 +1019,14 @@ async function sendTriageDigest(manual = false, weekly = false) {
       if (issue.mode && issue.mode !== 'Unspecified') return issue.mode;
       const text = String(issue.title || '').toLowerCase();
       const modes = [
-        [/raid\\s*sim|raid\\s*simulator/, 'Raid Sim'],
-        [/aim\\s*train/, 'Aim Train'],
-        [/ak\\s*ffa/, 'AK FFA'],
-        [/frag\\s*island/, 'Frag Island'],
-        [/public\\s*duels?/, 'Public Duels'],
-        [/primitive\\s*ffa/, 'Primitive FFA'],
-        [/gun\\s*game/, 'Gun Game'],
-        [/hardpoint|\\bkoth\\b/, 'Hardpoint'],
+        [/raid\s*sim|raid\s*simulator/, 'Raid Sim'],
+        [/aim\s*train/, 'Aim Train'],
+        [/ak\s*ffa/, 'AK FFA'],
+        [/frag\s*island/, 'Frag Island'],
+        [/public\s*duels?/, 'Public Duels'],
+        [/primitive\s*ffa/, 'Primitive FFA'],
+        [/gun\s*game/, 'Gun Game'],
+        [/hardpoint|\bkoth\b/, 'Hardpoint'],
         [/parkour/, 'Parkour']
       ];
       const found = modes.find(([regex])=>regex.test(text));
